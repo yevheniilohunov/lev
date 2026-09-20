@@ -354,7 +354,10 @@ impl<'a> Validator<'a> {
 
                 self.require_value(function, use_block, *value, definitions, dominance);
             }
-            IrInstruction::AllocStruct { .. } => {},
+            IrInstruction::AllocStruct { .. } => {}
+            IrInstruction::StructCopy { source, .. } => {
+                self.require_value(function, use_block, *source, definitions, dominance);
+            }
         }
     }
 
@@ -539,13 +542,14 @@ fn instruction_destination(instruction: &IrInstruction) -> Option<ValueId> {
         | IrInstruction::LoadLocal { destination, .. }
         | IrInstruction::Parameter { destination, .. }
         | IrInstruction::Phi { destination, .. }
+        | IrInstruction::StructCopy { destination, .. }
         | IrInstruction::Binary { destination, .. } => Some(*destination),
 
         IrInstruction::StoreLocal { .. } => None,
 
         IrInstruction::Call { destination, .. } => *destination,
         IrInstruction::LoadField { destination, .. } => Some(*destination),
-        IrInstruction::AllocStruct { destination, .. } =>  Some(*destination),
+        IrInstruction::AllocStruct { destination, .. } => Some(*destination),
         IrInstruction::StoreField { .. } => None,
     }
 }

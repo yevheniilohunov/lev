@@ -22,5 +22,4 @@ pub use ssa::construct_ssa;
 pub use validate::{
     validate,
     validate_ssa,
-    DominanceInfo,
 };

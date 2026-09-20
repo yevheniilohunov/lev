@@ -23,7 +23,7 @@ pub struct IrField {
     pub ty: IrType,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct IrFunction {
     pub id: FunctionId,
     pub name: String,
@@ -42,7 +42,7 @@ pub struct IrLocal {
     pub ty: IrType,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Default)]
 pub struct BlockId(pub usize);
 
 #[derive(Debug, Clone)]
@@ -78,6 +78,12 @@ pub enum IrInstruction {
     LoadLocal {
         destination: ValueId,
         local: LocalId,
+    },
+
+    StructCopy {
+        destination: ValueId,
+        source: ValueId,
+        struct_id: StructId,
     },
 
     StoreLocal {
@@ -154,8 +160,10 @@ pub enum IrBinaryOp {
     Equal,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub enum IrType {
+    #[default]
+    None,
     Int,
     String,
     Bool,

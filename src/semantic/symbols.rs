@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use super::types::Type;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct FunctionId(pub usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

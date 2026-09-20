@@ -168,7 +168,7 @@ impl FunctionBuilder {
     fn lower_stmt(&mut self, statement: &HirStmt) {
         match statement {
             HirStmt::Let { local, value } => {
-                if let Some(value) = self.lower_expr(value) {
+                if let Some(value) = self.lower_value_for_local(value) {
                     self.emit(IrInstruction::StoreLocal {
                         local: *local,
                         value,
@@ -177,7 +177,7 @@ impl FunctionBuilder {
             }
 
             HirStmt::Const { local, value } => {
-                if let Some(value) = self.lower_expr(value) {
+                if let Some(value) = self.lower_value_for_local(value) {
                     self.emit(IrInstruction::StoreLocal {
                         local: *local,
                         value,
@@ -186,7 +186,7 @@ impl FunctionBuilder {
             }
 
             HirStmt::Assign { local, value } => {
-                if let Some(value) = self.lower_expr(value) {
+                if let Some(value) = self.lower_value_for_local(value) {
                     self.emit(IrInstruction::StoreLocal {
                         local: *local,
                         value,
@@ -223,6 +223,29 @@ impl FunctionBuilder {
                     self.terminate(Terminator::Jump(targets.condition));
                 }
             }
+        }
+    }
+
+    fn lower_value_for_local(&mut self, expr: &HirExpr) -> Option<ValueId> {
+        let value = self.lower_expr(expr)?;
+
+        if let Type::Struct(struct_id) = expr.ty {
+            // A struct constructor already creates its own object.
+            if matches!(expr.kind, HirExprKind::StructInit { .. }) {
+                return Some(value);
+            }
+
+            let destination = self.new_value();
+
+            self.emit(IrInstruction::StructCopy {
+                destination,
+                source: value,
+                struct_id,
+            });
+
+            Some(destination)
+        } else {
+            Some(value)
         }
     }
 

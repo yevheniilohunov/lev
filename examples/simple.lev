@@ -1,5 +1,11 @@
-fn main(): int {
-    let x: int = 10;
-    x = 20;
-    return x;
+struct Person {
+    name: string;
+    age: int;
+}
+
+fn main(): string {
+    let p1: Person = Person("Alice", 30);
+    let p2: Person = p1;
+
+    return p2.name;
 }

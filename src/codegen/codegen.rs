@@ -173,19 +173,27 @@ impl<'a> FunctionCodegen<'a> {
     fn allocate_struct_storage(&mut self) {
         for block in &self.function.blocks {
             for instruction in &block.instructions {
-                let IrInstruction::AllocStruct { destination, struct_id } = instruction else {
-                    continue;
+                let (destination, struct_id) = match instruction {
+                    IrInstruction::AllocStruct { destination, struct_id } =>
+                        (*destination, *struct_id),
+
+                    IrInstruction::StructCopy { destination, struct_id, .. } =>
+                        (*destination, *struct_id),
+
+                    _ => {
+                        continue;
+                    }
                 };
 
                 let Some(structure) = self.program.structs
                     .iter()
-                    .find(|structure| structure.id == *struct_id) else {
+                    .find(|structure| structure.id == struct_id) else {
                     continue;
                 };
 
-                self.struct_storage.insert(*destination, self.next_stack_offset);
-
                 let size = (structure.fields.len() as i32) * 8;
+
+                self.struct_storage.insert(destination, self.next_stack_offset);
 
                 self.next_stack_offset += size;
             }
@@ -460,7 +468,7 @@ impl<'a> FunctionCodegen<'a> {
         // terminator transfers control.
         self.emit_edge_copies(block.id)?;
 
-        self.emit_terminator(&block.terminator);
+        self.emit_terminator(&block.terminator)?;
 
         Ok(())
     }
@@ -468,10 +476,6 @@ impl<'a> FunctionCodegen<'a> {
     // ---------------------------------------------------------------------
     // Instructions
     // ---------------------------------------------------------------------
-
-    fn function_name(&self, id: FunctionId) -> Option<&str> {
-        self.function_names.get(&id).map(String::as_str)
-    }
 
     fn argument_register(index: usize) -> Option<&'static str> {
         match index {
@@ -737,6 +741,58 @@ impl<'a> FunctionCodegen<'a> {
                     )?;
                 }
             }
+            IrInstruction::StructCopy { destination, source, struct_id } => {
+                let destination_offset = self.struct_storage
+                    .get(destination)
+                    .copied()
+                    .ok_or_else(|| {
+                        vec![
+                            CompilerError::internal(
+                                format!(
+                                    "no stack storage allocated for struct copy destination {:?}",
+                                    destination
+                                )
+                            )
+                        ]
+                    })?;
+
+                let structure = self.program.structs
+                    .iter()
+                    .find(|structure| structure.id == *struct_id)
+                    .ok_or_else(|| {
+                        vec![CompilerError::internal(format!("unknown struct id {:?}", struct_id))]
+                    })?;
+
+                self.emit_load(*source, "rax")?;
+
+                writeln!(self.output, "    lea rdx, [rbp-{}]", destination_offset).map_err(|e|
+                    vec![CompilerError::internal(e.to_string())]
+                )?;
+
+                for field_index in 0..structure.fields.len() {
+                    let offset = (field_index as i32) * 8;
+
+                    if offset == 0 {
+                        writeln!(self.output, "    mov rcx, [rax]").map_err(|e|
+                            vec![CompilerError::internal(e.to_string())]
+                        )?;
+
+                        writeln!(self.output, "    mov [rdx], rcx").map_err(|e|
+                            vec![CompilerError::internal(e.to_string())]
+                        )?;
+                    } else {
+                        writeln!(self.output, "    mov rcx, [rax+{}]", offset).map_err(|e|
+                            vec![CompilerError::internal(e.to_string())]
+                        )?;
+
+                        writeln!(self.output, "    mov [rdx+{}], rcx", offset).map_err(|e|
+                            vec![CompilerError::internal(e.to_string())]
+                        )?;
+                    }
+                }
+
+                self.emit_store(*destination, "rdx")?;
+            }
         }
 
         Ok(())
@@ -922,7 +978,11 @@ fn instruction_destination(instruction: &IrInstruction) -> Option<ValueId> {
         IrInstruction::Phi { destination, .. } => { Some(*destination) }
 
         IrInstruction::LoadField { destination, .. } => { Some(*destination) }
+
         IrInstruction::AllocStruct { destination, .. } => { Some(*destination) }
+
+        IrInstruction::StructCopy { destination, .. } => { Some(*destination) }
+
         IrInstruction::StoreField { .. } => None,
     }
 }

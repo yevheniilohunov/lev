@@ -419,6 +419,15 @@ fn rename_block(
                     field,
                 });
             }
+            IrInstruction::StructCopy { destination, source, struct_id } => {
+                let source = resolve_alias(aliases, source);
+
+                new_instructions.push(IrInstruction::StructCopy {
+                    destination,
+                    source,
+                    struct_id,
+                });
+            }
         }
     }
 
@@ -637,11 +646,12 @@ fn instruction_destination(instruction: &IrInstruction) -> Option<ValueId> {
         | IrInstruction::Binary { destination, .. }
         | IrInstruction::LoadField { destination, .. }
         | IrInstruction::AllocStruct { destination, .. }
+        | IrInstruction::StructCopy { destination, .. }
         | IrInstruction::Phi { destination, .. } => Some(*destination),
 
         IrInstruction::Call { destination, .. } => *destination,
-        
+
         IrInstruction::StoreLocal { .. } => None,
-        IrInstruction::StoreField { .. } => None
+        IrInstruction::StoreField { .. } => None,
     }
 }

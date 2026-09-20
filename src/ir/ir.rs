@@ -14,6 +14,7 @@ pub struct IrProgram {
 pub struct IrStruct {
     pub id: StructId,
     pub name: String,
+    pub base: Option<StructId>,
     pub fields: Vec<IrField>,
 }
 
@@ -246,6 +247,10 @@ impl fmt::Display for IrProgram {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for structure in &self.structs {
             writeln!(f, "struct #{} {} {{", structure.id.0, structure.name)?;
+
+            if let Some(base) = structure.base {
+                writeln!(f, "  extends: struct #{};", base.0)?;
+            }
 
             for field in &structure.fields {
                 writeln!(f, "  {}: {:?};", field.name, field.ty)?;

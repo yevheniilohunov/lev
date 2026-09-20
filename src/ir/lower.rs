@@ -8,6 +8,7 @@ pub fn lower_to_ir(program: HirProgram) -> Result<IrProgram, Vec<CompilerError>>
         .map(|structure| IrStruct {
             id: structure.id,
             name: structure.name.clone(),
+            base: structure.base,
             fields: structure.fields
                 .iter()
                 .map(|field| IrField {

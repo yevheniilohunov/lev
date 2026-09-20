@@ -3,6 +3,10 @@ struct Person {
     age: int;
 }
 
+struct Employee extends Person {
+    employee_id: int;
+}
+
 fn main(): string {
     let p1: Person = Person("Alice", 30);
     let p2: Person = p1;

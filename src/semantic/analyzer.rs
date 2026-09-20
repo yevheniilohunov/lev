@@ -5,6 +5,7 @@ use crate::compiler::source::SourceFile;
 use crate::compiler::{ source::Span };
 
 use crate::parser::ast::*;
+use crate::semantic::modifiers::Visibility;
 
 use super::{ hir::*, scope::Scope, symbols::*, types::Type };
 
@@ -12,6 +13,7 @@ pub fn analyze(program: Program, source: SourceFile) -> Result<HirProgram, Vec<C
     let mut analyzer = Analyzer::new(&source);
 
     analyzer.collect_struct_names(&program);
+    analyzer.resolve_struct_bases(&program);
     analyzer.collect_function_signatures(&program);
     analyzer.collect_struct_fields(&program);
 
@@ -32,6 +34,7 @@ struct Analyzer<'a> {
     source: &'a SourceFile,
     symbols: SymbolTable,
     errors: Vec<CompilerError>,
+    current_owner: Option<StructId>,
 }
 
 impl<'a> Analyzer<'a> {
@@ -40,6 +43,7 @@ impl<'a> Analyzer<'a> {
             source,
             symbols: SymbolTable::new(),
             errors: Vec::new(),
+            current_owner: None,
         }
     }
 
@@ -134,6 +138,8 @@ impl<'a> Analyzer<'a> {
                     fields.push(FieldSymbol {
                         name: field.name.clone(),
                         ty,
+                        visibility: field.visibility,
+                        owner: struct_id,
                     });
                 }
             }
@@ -190,6 +196,7 @@ impl<'a> Analyzer<'a> {
             hir_structs.push(HirStruct {
                 id: struct_id,
                 name: struct_symbol.name.clone(),
+                base: struct_symbol.base,
                 fields,
             });
 
@@ -227,6 +234,9 @@ impl<'a> Analyzer<'a> {
         function_id: FunctionId
     ) -> HirFunction {
         let symbol = self.symbols.function_symbol(function_id).clone();
+
+        self.current_owner = symbol.owner;
+
         let mut scope = Scope::new();
         let mut params = Vec::new();
 
@@ -286,6 +296,8 @@ impl<'a> Analyzer<'a> {
             })
             .collect();
 
+        self.current_owner = None;
+
         HirFunction {
             id: function_id,
             name: symbol.name,
@@ -295,6 +307,36 @@ impl<'a> Analyzer<'a> {
             return_type: symbol.return_type,
             body,
         }
+    }
+
+    fn can_access_field(&self, field: &FieldSymbol) -> bool {
+        match field.visibility {
+            Visibility::Public => true,
+
+            Visibility::Private => { self.current_owner == Some(field.owner) }
+
+            Visibility::Protected => {
+                let Some(current_owner) = self.current_owner else {
+                    return false;
+                };
+
+                self.is_same_or_derived(current_owner, field.owner)
+            }
+        }
+    }
+
+    fn is_same_or_derived(&self, current: StructId, target: StructId) -> bool {
+        let mut current = Some(current);
+
+        while let Some(struct_id) = current {
+            if struct_id == target {
+                return true;
+            }
+
+            current = self.symbols.struct_base(struct_id);
+        }
+
+        false
     }
 
     // ---------------------------------------------------------------------
@@ -998,9 +1040,25 @@ impl<'a> Analyzer<'a> {
                 let analyzed_receiver = self.analyze_expr(receiver, scope);
 
                 let Type::Struct(struct_id) = analyzed_receiver.ty else {
+                    let receiver_type = analyzed_receiver.ty.clone();
+
+                    self.errors.push(
+                        self.error_at(format!("type {:?} has no fields", receiver_type), *span)
+                    );
+
+                    return HirExpr {
+                        kind: HirExprKind::Integer(0),
+                        ty: Type::Int,
+                        span: *span,
+                    };
+                };
+
+                let Some((field_index, field)) = self.symbols.find_field(struct_id, name) else {
+                    let struct_name = self.symbols.struct_symbol(struct_id).name.clone();
+
                     self.errors.push(
                         self.error_at(
-                            format!("type {:?} has no fields", analyzed_receiver.ty),
+                            format!("struct '{}' has no field '{}'", struct_name, name),
                             *span
                         )
                     );
@@ -1012,16 +1070,23 @@ impl<'a> Analyzer<'a> {
                     };
                 };
 
-                let struct_symbol = self.symbols.struct_symbol(struct_id);
+                if !self.can_access_field(field) {
+                    let visibility = match field.visibility {
+                        Visibility::Public => "public",
+                        Visibility::Protected => "protected",
+                        Visibility::Private => "private",
+                    };
 
-                let Some((field_index, field_type)) = struct_symbol.fields
-                    .iter()
-                    .enumerate()
-                    .find(|(_, field)| field.name == *name)
-                    .map(|(index, field)| (index, field.ty.clone())) else {
+                    let struct_name = self.symbols.struct_symbol(struct_id).name.clone();
+
                     self.errors.push(
                         self.error_at(
-                            format!("struct '{}' has no field '{}'", struct_symbol.name, name),
+                            format!(
+                                "cannot access {} field '{}' of struct '{}'",
+                                visibility,
+                                name,
+                                struct_name
+                            ),
                             *span
                         )
                     );
@@ -1031,18 +1096,88 @@ impl<'a> Analyzer<'a> {
                         ty: Type::Int,
                         span: *span,
                     };
-                };
+                }
 
                 HirExpr {
                     kind: HirExprKind::Field {
                         receiver: Box::new(analyzed_receiver),
                         field: field_index,
                     },
-                    ty: field_type,
+                    ty: field.ty.clone(),
                     span: *span,
                 }
             }
         }
+    }
+
+    fn resolve_struct_bases(&mut self, program: &Program) {
+        for structure in &program.structs {
+            let Some(struct_id) = self.symbols.find_struct(&structure.name) else {
+                continue;
+            };
+
+            let Some(base_name) = &structure.base else {
+                continue;
+            };
+
+            let Some(base_id) = self.symbols.find_struct(base_name) else {
+                self.errors.push(
+                    self.error_at(
+                        format!(
+                            "struct '{}' extends unknown struct '{}'",
+                            structure.name,
+                            base_name
+                        ),
+                        structure.span
+                    )
+                );
+
+                continue;
+            };
+
+            if struct_id == base_id {
+                self.errors.push(
+                    self.error_at(
+                        format!("struct '{}' cannot extend itself", structure.name),
+                        structure.span
+                    )
+                );
+
+                continue;
+            }
+
+            self.symbols.set_struct_base(struct_id, base_id);
+        }
+
+        for structure in &program.structs {
+            let Some(struct_id) = self.symbols.find_struct(&structure.name) else {
+                continue;
+            };
+
+            if self.has_inheritance_cycle(struct_id) {
+                self.errors.push(
+                    self.error_at(
+                        format!("inheritance cycle involving struct '{}'", structure.name),
+                        structure.span
+                    )
+                );
+            }
+        }
+    }
+
+    fn has_inheritance_cycle(&self, start: StructId) -> bool {
+        let mut visited = HashSet::new();
+        let mut current = Some(start);
+
+        while let Some(struct_id) = current {
+            if !visited.insert(struct_id) {
+                return true;
+            }
+
+            current = self.symbols.struct_base(struct_id);
+        }
+
+        false
     }
 }
 

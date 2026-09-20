@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use crate::semantic::modifiers::Visibility;
+
 use super::types::Type;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -15,6 +17,7 @@ pub struct LocalId(pub usize);
 pub struct StructSymbol {
     pub id: StructId,
     pub name: String,
+    pub base: Option<StructId>,
     pub fields: Vec<FieldSymbol>,
 }
 
@@ -22,6 +25,8 @@ pub struct StructSymbol {
 pub struct FieldSymbol {
     pub name: String,
     pub ty: Type,
+    pub visibility: Visibility,
+    pub owner: StructId,
 }
 
 #[derive(Debug, Clone)]
@@ -63,9 +68,28 @@ impl SymbolTable {
         }
         let id = StructId(self.structs.len());
         self.struct_names.insert(name.clone(), id);
-        self.structs.push(StructSymbol { id, name, fields: Vec::new() });
+        self.structs.push(StructSymbol { id, name, base: None, fields: Vec::new() });
 
         Ok(id)
+    }
+
+    pub fn set_struct_base(&mut self, id: StructId, base: StructId) {
+        self.structs[id.0].base = Some(base);
+    }
+
+    pub fn struct_base(&self, id: StructId) -> Option<StructId> {
+        self.struct_symbol(id).base
+    }
+
+    pub fn find_field(&self, struct_id: StructId, name: &str) -> Option<(usize, &FieldSymbol)> {
+        self.structs[struct_id.0].fields
+            .iter()
+            .enumerate()
+            .find(|(_, field)| field.name == name)
+    }
+
+    pub fn struct_count(&self) -> usize {
+        self.structs.len()
     }
 
     pub fn set_struct_fields(&mut self, id: StructId, fields: Vec<FieldSymbol>) {
@@ -83,7 +107,7 @@ impl SymbolTable {
         }
 
         let id = FunctionId(self.functions.len());
-        
+
         self.function_names.insert(name.clone(), id);
         self.functions.push(FunctionSymbol { id, name, owner: None, parameters, return_type });
         Ok(id)
@@ -97,12 +121,12 @@ impl SymbolTable {
         return_type: Type
     ) -> Result<FunctionId, String> {
         let key = (owner, name.clone());
-    
+
         if self.method_names.contains_key(&key) {
             let struct_name = self.struct_symbol(owner).name.clone();
             return Err(format!("method '{}.{}' is already declared", struct_name, name));
         }
-    
+
         let id = FunctionId(self.functions.len());
 
         self.method_names.insert(key, id);
@@ -117,7 +141,7 @@ impl SymbolTable {
 
         Ok(id)
     }
-    
+
     pub fn find_struct(&self, name: &str) -> Option<StructId> {
         self.struct_names.get(name).copied()
     }

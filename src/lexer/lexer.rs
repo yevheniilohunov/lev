@@ -212,6 +212,7 @@ impl<'a> Lexer<'a> {
         let text = self.source.slice(start, self.position);
 
         let kind = match text {
+            "extends"  => TokenKind::Extends,
             "struct" => TokenKind::Struct,
             "fn" => TokenKind::Fn,
             "let" => TokenKind::Let,
@@ -231,6 +232,10 @@ impl<'a> Lexer<'a> {
             "while" => TokenKind::While,
             "break" => TokenKind::Break,
             "continue" => TokenKind::Continue,
+
+            "public" => TokenKind::Public,
+            "private" => TokenKind::Private,
+            "protected" => TokenKind::Protected,
 
             _ => TokenKind::Identifier(text.to_string()),
         };

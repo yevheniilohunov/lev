@@ -16,6 +16,7 @@ pub struct HirProgram {
 pub struct HirStruct {
     pub id: StructId,
     pub name: String,
+    pub base: Option<StructId>,
     pub fields: Vec<HirField>,
 }
 

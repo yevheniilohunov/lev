@@ -1,6 +1,6 @@
-use crate::compiler::{
-    error::CompilerError,
-    source::{SourceFile, Span},
+use crate::{
+    compiler::{ error::CompilerError, source::{ SourceFile, Span } },
+    semantic::modifiers::Visibility,
 };
 
 use super::ast::{
@@ -15,12 +15,9 @@ use super::ast::{
     TypeName,
 };
 
-use crate::lexer::token::{Token, TokenKind};
+use crate::lexer::token::{ Token, TokenKind };
 
-pub fn parse(
-    source: &SourceFile,
-    tokens: &[Token],
-) -> Result<Program, Vec<CompilerError>> {
+pub fn parse(source: &SourceFile, tokens: &[Token]) -> Result<Program, Vec<CompilerError>> {
     let mut parser = Parser::new(source, tokens);
     parser.parse_program()
 }
@@ -76,14 +73,19 @@ impl<'a> Parser<'a> {
 
         let name = self.expect_identifier("expected struct name")?;
 
+        let base = if self.consume(&TokenKind::Extends) {
+            Some(self.expect_identifier("expected base struct name")?)
+        } else {
+            None
+        };
+
         self.expect(&TokenKind::LeftBrace, "expected '{'")?;
+    
 
         let mut fields = Vec::new();
         let mut methods = Vec::new();
 
-        while !self.check(&TokenKind::RightBrace)
-            && !self.check(&TokenKind::Eof)
-        {
+        while !self.check(&TokenKind::RightBrace) && !self.check(&TokenKind::Eof) {
             if self.check(&TokenKind::Fn) {
                 let method = self.parse_function()?;
                 methods.push(method);
@@ -97,6 +99,7 @@ impl<'a> Parser<'a> {
 
         Ok(StructDecl {
             name,
+            base,
             fields,
             methods,
             span: Span::new(start, self.previous_span().end),
@@ -106,22 +109,30 @@ impl<'a> Parser<'a> {
     fn parse_struct_field(&mut self) -> Result<FieldDecl, CompilerError> {
         let start = self.current_span().start;
 
+        let visibility = if self.consume(&TokenKind::Protected) {
+            Visibility::Protected
+        } else if self.consume(&TokenKind::Private) {
+            Visibility::Private
+        } else if self.consume(&TokenKind::Public) {
+            Visibility::Public
+        } else {
+            Visibility::Public
+        };
+
         let name = self.expect_identifier("expected field name")?;
 
         self.expect(&TokenKind::Colon, "expected ':' after field name")?;
 
         let ty = self.parse_type()?;
 
-        self.expect(
-            &TokenKind::Semicolon,
-            "expected ';' after field declaration",
-        )?;
+        self.expect(&TokenKind::Semicolon, "expected ';' after field declaration")?;
 
         let end = self.previous_span().end;
 
         Ok(FieldDecl {
             name,
             ty,
+            visibility,
             span: Span::new(start, end),
         })
     }
@@ -141,23 +152,16 @@ impl<'a> Parser<'a> {
             loop {
                 let param_start = self.current_span().start;
 
-                let param_name =
-                    self.expect_identifier("expected parameter name")?;
+                let param_name = self.expect_identifier("expected parameter name")?;
 
-                self.expect(
-                    &TokenKind::Colon,
-                    "expected ':' after parameter name",
-                )?;
+                self.expect(&TokenKind::Colon, "expected ':' after parameter name")?;
 
                 let ty = self.parse_type()?;
 
                 params.push(Param {
                     name: param_name,
                     ty,
-                    span: Span::new(
-                        param_start,
-                        self.previous_span().end,
-                    ),
+                    span: Span::new(param_start, self.previous_span().end),
                 });
 
                 if !self.consume(&TokenKind::Comma) {
@@ -168,10 +172,7 @@ impl<'a> Parser<'a> {
 
         self.expect(&TokenKind::RightParen, "expected ')'")?;
 
-        self.expect(
-            &TokenKind::Colon,
-            "expected ':' before return type",
-        )?;
+        self.expect(&TokenKind::Colon, "expected ':' before return type")?;
 
         let return_type = self.parse_type()?;
 
@@ -193,9 +194,7 @@ impl<'a> Parser<'a> {
 
         let mut statements = Vec::new();
 
-        while !self.check(&TokenKind::RightBrace)
-            && !self.check(&TokenKind::Eof)
-        {
+        while !self.check(&TokenKind::RightBrace) && !self.check(&TokenKind::Eof) {
             statements.push(self.parse_statement()?);
         }
 
@@ -233,10 +232,7 @@ impl<'a> Parser<'a> {
 
             self.advance();
 
-            self.expect(
-                &TokenKind::Semicolon,
-                "expected ';' after 'break'",
-            )?;
+            self.expect(&TokenKind::Semicolon, "expected ';' after 'break'")?;
 
             return Ok(Stmt::Break {
                 span: Span::new(start, self.previous_span().end),
@@ -248,10 +244,7 @@ impl<'a> Parser<'a> {
 
             self.advance();
 
-            self.expect(
-                &TokenKind::Semicolon,
-                "expected ';' after 'continue'",
-            )?;
+            self.expect(&TokenKind::Semicolon, "expected ';' after 'continue'")?;
 
             return Ok(Stmt::Continue {
                 span: Span::new(start, self.previous_span().end),
@@ -277,10 +270,7 @@ impl<'a> Parser<'a> {
 
         let expr = self.parse_expression()?;
 
-        self.expect(
-            &TokenKind::Semicolon,
-            "expected ';' after expression",
-        )?;
+        self.expect(&TokenKind::Semicolon, "expected ';' after expression")?;
 
         Ok(Stmt::Expr {
             expr,
@@ -295,24 +285,15 @@ impl<'a> Parser<'a> {
 
         let name = self.expect_identifier("expected variable name")?;
 
-        self.expect(
-            &TokenKind::Colon,
-            "expected ':' after variable name",
-        )?;
+        self.expect(&TokenKind::Colon, "expected ':' after variable name")?;
 
         let ty = self.parse_type()?;
 
-        self.expect(
-            &TokenKind::Equal,
-            "expected '=' in variable declaration",
-        )?;
+        self.expect(&TokenKind::Equal, "expected '=' in variable declaration")?;
 
         let value = self.parse_expression()?;
 
-        self.expect(
-            &TokenKind::Semicolon,
-            "expected ';' after variable declaration",
-        )?;
+        self.expect(&TokenKind::Semicolon, "expected ';' after variable declaration")?;
 
         Ok(Stmt::Let {
             name,
@@ -329,24 +310,15 @@ impl<'a> Parser<'a> {
 
         let name = self.expect_identifier("expected variable name")?;
 
-        self.expect(
-            &TokenKind::Colon,
-            "expected ':' after variable name",
-        )?;
+        self.expect(&TokenKind::Colon, "expected ':' after variable name")?;
 
         let ty = self.parse_type()?;
 
-        self.expect(
-            &TokenKind::Equal,
-            "expected '=' in variable declaration",
-        )?;
+        self.expect(&TokenKind::Equal, "expected '=' in variable declaration")?;
 
         let value = self.parse_expression()?;
 
-        self.expect(
-            &TokenKind::Semicolon,
-            "expected ';' after variable declaration",
-        )?;
+        self.expect(&TokenKind::Semicolon, "expected ';' after variable declaration")?;
 
         Ok(Stmt::Const {
             name,
@@ -359,20 +331,13 @@ impl<'a> Parser<'a> {
     fn parse_assignment_statement(&mut self) -> Result<Stmt, CompilerError> {
         let start = self.current_span().start;
 
-        let name =
-            self.expect_identifier("expected variable name")?;
+        let name = self.expect_identifier("expected variable name")?;
 
-        self.expect(
-            &TokenKind::Equal,
-            "expected '=' in assignment",
-        )?;
+        self.expect(&TokenKind::Equal, "expected '=' in assignment")?;
 
         let value = self.parse_expression()?;
 
-        self.expect(
-            &TokenKind::Semicolon,
-            "expected ';' after assignment",
-        )?;
+        self.expect(&TokenKind::Semicolon, "expected ';' after assignment")?;
 
         Ok(Stmt::Assign {
             name,
@@ -392,10 +357,7 @@ impl<'a> Parser<'a> {
             Some(self.parse_expression()?)
         };
 
-        self.expect(
-            &TokenKind::Semicolon,
-            "expected ';' after return",
-        )?;
+        self.expect(&TokenKind::Semicolon, "expected ';' after return")?;
 
         Ok(Stmt::Return {
             value,
@@ -408,17 +370,11 @@ impl<'a> Parser<'a> {
 
         self.expect(&TokenKind::If, "expected 'if'")?;
 
-        self.expect(
-            &TokenKind::LeftParen,
-            "expected '(' after 'if'",
-        )?;
+        self.expect(&TokenKind::LeftParen, "expected '(' after 'if'")?;
 
         let condition = self.parse_expression()?;
 
-        self.expect(
-            &TokenKind::RightParen,
-            "expected ')' after condition",
-        )?;
+        self.expect(&TokenKind::RightParen, "expected ')' after condition")?;
 
         let then_block = self.parse_block()?;
 
@@ -441,17 +397,11 @@ impl<'a> Parser<'a> {
 
         self.expect(&TokenKind::While, "expected 'while'")?;
 
-        self.expect(
-            &TokenKind::LeftParen,
-            "expected '(' after 'while'",
-        )?;
+        self.expect(&TokenKind::LeftParen, "expected '(' after 'while'")?;
 
         let condition = self.parse_expression()?;
 
-        self.expect(
-            &TokenKind::RightParen,
-            "expected ')' after condition",
-        )?;
+        self.expect(&TokenKind::RightParen, "expected ')' after condition")?;
 
         let body = self.parse_block()?;
 
@@ -471,10 +421,7 @@ impl<'a> Parser<'a> {
             TokenKind::Bool => Ok(TypeName::Bool),
             TokenKind::Void => Ok(TypeName::Void),
             TokenKind::Identifier(name) => Ok(TypeName::Named(name)),
-            _ => Err(self.error_at(
-                "expected type",
-                token.span,
-            )),
+            _ => Err(self.error_at("expected type", token.span)),
         }
     }
 
@@ -488,8 +435,7 @@ impl<'a> Parser<'a> {
         while self.consume(&TokenKind::EqualEqual) {
             let right = self.parse_additive()?;
 
-            let span =
-                Span::new(expression_start(&expr), expression_end(&right));
+            let span = Span::new(expression_start(&expr), expression_end(&right));
 
             expr = Expr::Binary {
                 op: BinaryOp::Equal,
@@ -520,8 +466,7 @@ impl<'a> Parser<'a> {
 
             let right = self.parse_multiplicative()?;
 
-            let span =
-                Span::new(expression_start(&expr), expression_end(&right));
+            let span = Span::new(expression_start(&expr), expression_end(&right));
 
             expr = Expr::Binary {
                 op,
@@ -552,8 +497,7 @@ impl<'a> Parser<'a> {
 
             let right = self.parse_primary()?;
 
-            let span =
-                Span::new(expression_start(&expr), expression_end(&right));
+            let span = Span::new(expression_start(&expr), expression_end(&right));
 
             expr = Expr::Binary {
                 op,
@@ -570,30 +514,35 @@ impl<'a> Parser<'a> {
         let token = self.advance();
 
         let mut expression = match token.kind {
-            TokenKind::Integer(value) => Expr::Integer {
-                value,
-                span: token.span,
-            },
+            TokenKind::Integer(value) =>
+                Expr::Integer {
+                    value,
+                    span: token.span,
+                },
 
-            TokenKind::String(value) => Expr::String {
-                value,
-                span: token.span,
-            },
+            TokenKind::String(value) =>
+                Expr::String {
+                    value,
+                    span: token.span,
+                },
 
-            TokenKind::True => Expr::Bool {
-                value: true,
-                span: token.span,
-            },
+            TokenKind::True =>
+                Expr::Bool {
+                    value: true,
+                    span: token.span,
+                },
 
-            TokenKind::False => Expr::Bool {
-                value: false,
-                span: token.span,
-            },
+            TokenKind::False =>
+                Expr::Bool {
+                    value: false,
+                    span: token.span,
+                },
 
-            TokenKind::Identifier(name) => Expr::Identifier {
-                name,
-                span: token.span,
-            },
+            TokenKind::Identifier(name) =>
+                Expr::Identifier {
+                    name,
+                    span: token.span,
+                },
 
             TokenKind::LeftParen => {
                 let expression = self.parse_expression()?;
@@ -602,10 +551,7 @@ impl<'a> Parser<'a> {
             }
 
             _ => {
-                return Err(self.error_at(
-                    "expected expression",
-                    token.span,
-                ));
+                return Err(self.error_at("expected expression", token.span));
             }
         };
 
@@ -614,28 +560,26 @@ impl<'a> Parser<'a> {
                 let arguments = self.parse_call_arguments()?;
 
                 let Expr::Identifier { name, span } = expression else {
-                    return Err(self.error_at(
-                        "only function names can be called directly",
-                        expression.span(),
-                    ));
+                    return Err(
+                        self.error_at(
+                            "only function names can be called directly",
+                            expression.span()
+                        )
+                    );
                 };
 
                 expression = Expr::Call {
                     receiver: None,
                     name,
                     arguments,
-                    span: Span::new(
-                        span.start,
-                        self.previous_span().end,
-                    ),
+                    span: Span::new(span.start, self.previous_span().end),
                 };
 
                 continue;
             }
 
             if self.consume(&TokenKind::Dot) {
-                let member_name =
-                    self.expect_identifier("expected name after '.'")?;
+                let member_name = self.expect_identifier("expected name after '.'")?;
 
                 if self.consume(&TokenKind::LeftParen) {
                     let arguments = self.parse_call_arguments()?;
@@ -644,19 +588,13 @@ impl<'a> Parser<'a> {
                         receiver: Some(Box::new(expression)),
                         name: member_name,
                         arguments,
-                        span: Span::new(
-                            token.span.start,
-                            self.previous_span().end,
-                        ),
+                        span: Span::new(token.span.start, self.previous_span().end),
                     };
                 } else {
                     expression = Expr::Member {
                         receiver: Box::new(expression),
                         name: member_name,
-                        span: Span::new(
-                            token.span.start,
-                            self.previous_span().end,
-                        ),
+                        span: Span::new(token.span.start, self.previous_span().end),
                     };
                 }
 
@@ -669,9 +607,7 @@ impl<'a> Parser<'a> {
         Ok(expression)
     }
 
-    fn parse_call_arguments(
-        &mut self,
-    ) -> Result<Vec<Expr>, CompilerError> {
+    fn parse_call_arguments(&mut self) -> Result<Vec<Expr>, CompilerError> {
         let mut arguments = Vec::new();
 
         if !self.check(&TokenKind::RightParen) {
@@ -684,32 +620,23 @@ impl<'a> Parser<'a> {
             }
         }
 
-        self.expect(
-            &TokenKind::RightParen,
-            "expected ')' after arguments",
-        )?;
+        self.expect(&TokenKind::RightParen, "expected ')' after arguments")?;
 
         Ok(arguments)
     }
 
     fn is_assignment_statement(&self) -> bool {
         matches!(
-            self.tokens
-                .get(self.position)
-                .map(|token| &token.kind),
+            self.tokens.get(self.position).map(|token| &token.kind),
             Some(TokenKind::Identifier(_))
-        ) && matches!(
-            self.tokens
-                .get(self.position + 1)
-                .map(|token| &token.kind),
-            Some(TokenKind::Equal)
-        )
+        ) &&
+            matches!(
+                self.tokens.get(self.position + 1).map(|token| &token.kind),
+                Some(TokenKind::Equal)
+            )
     }
 
-    fn expect_identifier(
-        &mut self,
-        message: &str,
-    ) -> Result<String, CompilerError> {
+    fn expect_identifier(&mut self, message: &str) -> Result<String, CompilerError> {
         let token = self.advance();
 
         match token.kind {
@@ -718,16 +645,8 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn expect(
-        &mut self,
-        expected: &TokenKind,
-        message: &str,
-    ) -> Result<Token, CompilerError> {
-        if self.check(expected) {
-            Ok(self.advance())
-        } else {
-            Err(self.error_here(message))
-        }
+    fn expect(&mut self, expected: &TokenKind, message: &str) -> Result<Token, CompilerError> {
+        if self.check(expected) { Ok(self.advance()) } else { Err(self.error_here(message)) }
     }
 
     fn consume(&mut self, kind: &TokenKind) -> bool {
@@ -740,20 +659,15 @@ impl<'a> Parser<'a> {
     }
 
     fn check(&self, kind: &TokenKind) -> bool {
-        std::mem::discriminant(&self.peek().kind)
-            == std::mem::discriminant(kind)
+        std::mem::discriminant(&self.peek().kind) == std::mem::discriminant(kind)
     }
 
     fn advance(&mut self) -> Token {
-        let token = self
-            .tokens
+        let token = self.tokens
             .get(self.position)
             .cloned()
             .unwrap_or_else(|| {
-                self.tokens
-                    .last()
-                    .cloned()
-                    .expect("parser requires at least EOF token")
+                self.tokens.last().cloned().expect("parser requires at least EOF token")
             });
 
         if self.position < self.tokens.len() {
@@ -766,11 +680,7 @@ impl<'a> Parser<'a> {
     fn peek(&self) -> &Token {
         self.tokens
             .get(self.position)
-            .unwrap_or_else(|| {
-                self.tokens
-                    .last()
-                    .expect("missing EOF token")
-            })
+            .unwrap_or_else(|| { self.tokens.last().expect("missing EOF token") })
     }
 
     fn current_span(&self) -> Span {
@@ -778,33 +688,21 @@ impl<'a> Parser<'a> {
     }
 
     fn previous_span(&self) -> Span {
-        if self.position == 0 {
-            self.current_span()
-        } else {
-            self.tokens[self.position - 1].span
-        }
+        if self.position == 0 { self.current_span() } else { self.tokens[self.position - 1].span }
     }
 
     fn error_here(&self, message: &str) -> CompilerError {
         self.error_at(message, self.current_span())
     }
 
-    fn error_at(
-        &self,
-        message: impl Into<String>,
-        span: Span,
-    ) -> CompilerError {
-        CompilerError::new(
-            &self.source.text,
-            message,
-            span.to_source_span(),
-        )
+    fn error_at(&self, message: impl Into<String>, span: Span) -> CompilerError {
+        CompilerError::new(&self.source.text, message, span.to_source_span())
     }
 }
 
 fn expression_start(expr: &Expr) -> usize {
     match expr {
-        Expr::Integer { span, .. }
+        | Expr::Integer { span, .. }
         | Expr::String { span, .. }
         | Expr::Bool { span, .. }
         | Expr::Identifier { span, .. }
@@ -816,7 +714,7 @@ fn expression_start(expr: &Expr) -> usize {
 
 fn expression_end(expr: &Expr) -> usize {
     match expr {
-        Expr::Integer { span, .. }
+        | Expr::Integer { span, .. }
         | Expr::String { span, .. }
         | Expr::Bool { span, .. }
         | Expr::Identifier { span, .. }

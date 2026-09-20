@@ -13,6 +13,7 @@ pub enum TokenKind {
     Integer(i64),
     String(String),
 
+    Extends,
     Struct,
     Fn,
     Let,
@@ -51,6 +52,10 @@ pub enum TokenKind {
     While,
     Break,
     Continue,
+
+    Public,
+    Private,
+    Protected,
 
     Eof,
 }

@@ -1,4 +1,4 @@
-use crate::compiler::source::Span;
+use crate::{compiler::source::Span, semantic::modifiers::Visibility};
 
 #[derive(Debug, Clone)]
 pub struct Program {
@@ -15,6 +15,7 @@ pub enum Item {
 #[derive(Debug, Clone, PartialEq)]
 pub struct StructDecl {
     pub name: String,
+    pub base: Option<String>,
     pub fields: Vec<FieldDecl>,
     pub methods: Vec<FunctionDecl>,
     pub span: Span,
@@ -24,13 +25,7 @@ pub struct StructDecl {
 pub struct FieldDecl {
     pub name: String,
     pub ty: TypeName,
-    pub span: Span,
-}
-
-#[derive(Debug, Clone)]
-pub struct Field {
-    pub name: String,
-    pub ty: TypeName,
+    pub visibility: Visibility,
     pub span: Span,
 }
 

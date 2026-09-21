@@ -189,10 +189,6 @@ impl IrFunction {
         self.blocks.get(id.0)
     }
 
-    pub fn block_mut(&mut self, id: BlockId) -> Option<&mut BasicBlock> {
-        self.blocks.get_mut(id.0)
-    }
-
     pub fn successors(&self, block: BlockId) -> Vec<BlockId> {
         let Some(block) = self.block(block) else {
             return Vec::new();

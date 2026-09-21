@@ -7,12 +7,6 @@ pub struct Program {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Item {
-    Struct(StructDecl),
-    Function(FunctionDecl),
-}
-
-#[derive(Debug, Clone, PartialEq)]
 pub struct StructDecl {
     pub name: String,
     pub base: Option<String>,
@@ -42,12 +36,6 @@ pub struct FunctionDecl {
 pub struct Param {
     pub name: String,
     pub ty: TypeName,
-    pub span: Span,
-}
-
-#[derive(Debug, Clone)]
-pub struct Block {
-    pub statements: Vec<Stmt>,
     pub span: Span,
 }
 
@@ -108,23 +96,6 @@ pub enum Stmt {
     Continue {
         span: Span,
     },
-}
-
-impl Stmt {
-    pub fn span(&self) -> Span {
-        match self {
-            | Stmt::Block { span, .. }
-            | Stmt::Let { span, .. }
-            | Stmt::Assign { span, .. }
-            | Stmt::Return { span, .. }
-            | Stmt::Expr { span, .. }
-            | Stmt::If { span, .. }
-            | Stmt::While { span, .. }
-            | Stmt::Break { span }
-            | Stmt::Const { span, .. }
-            | Stmt::Continue { span } => *span,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

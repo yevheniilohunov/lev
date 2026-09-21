@@ -66,7 +66,7 @@ impl SymbolTable {
         if self.struct_names.contains_key(&name) {
             return Err(format!("struct '{}' is already declared", name));
         }
-        let id = StructId(self.structs.len());
+        let id = StructId(self.struct_count());
         self.struct_names.insert(name.clone(), id);
         self.structs.push(StructSymbol { id, name, base: None, fields: Vec::new() });
 

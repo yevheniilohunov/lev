@@ -165,9 +165,19 @@ impl SymbolTable {
     }
 
     pub fn find_method(&self, owner: StructId, name: &str) -> Option<FunctionId> {
-        self.method_names.get(&(owner, name.to_string())).copied()
-    }
+        let mut current = Some(owner);
 
+        while let Some(struct_id) = current {
+            if let Some(function_id) = self.method_names.get(&(struct_id, name.to_string())) {
+                return Some(*function_id);
+            }
+
+            current = self.structs[struct_id.0].base;
+        }
+
+        None
+    }
+    
     pub fn struct_symbol(&self, id: StructId) -> &StructSymbol {
         &self.structs[id.0]
     }

@@ -21,6 +21,12 @@ pub enum CodegenTarget {
     X86_64MacOS,
 }
 
+impl Default for CodegenTarget {
+    fn default() -> Self {
+        CodegenTarget::X86_64
+    }
+}
+
 pub fn generate(program: &IrProgram, target: CodegenTarget) -> Result<String, Vec<CompilerError>> {
     let mut output = String::new();
 

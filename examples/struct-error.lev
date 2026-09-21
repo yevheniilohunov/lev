@@ -1,0 +1,10 @@
+struct Person {
+    protected age: int;
+}
+
+struct Employee extends Person {
+}
+
+fn get_age(employee: Employee): int {
+    return employee.age;
+}

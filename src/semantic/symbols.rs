@@ -82,10 +82,24 @@ impl SymbolTable {
     }
 
     pub fn find_field(&self, struct_id: StructId, name: &str) -> Option<(usize, &FieldSymbol)> {
-        self.structs[struct_id.0].fields
-            .iter()
-            .enumerate()
-            .find(|(_, field)| field.name == name)
+        let mut current = Some(struct_id);
+
+        while let Some(id) = current {
+            let structure = &self.structs[id.0];
+
+            if
+                let Some((index, field)) = structure.fields
+                    .iter()
+                    .enumerate()
+                    .find(|(_, field)| field.name == name)
+            {
+                return Some((index, field));
+            }
+
+            current = structure.base;
+        }
+
+        None
     }
 
     pub fn struct_count(&self) -> usize {

@@ -1101,6 +1101,7 @@ impl<'a> Analyzer<'a> {
                 HirExpr {
                     kind: HirExprKind::Field {
                         receiver: Box::new(analyzed_receiver),
+                        struct_id: field.owner,
                         field: field_index,
                     },
                     ty: field.ty.clone(),

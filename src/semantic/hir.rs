@@ -137,6 +137,7 @@ pub enum HirExprKind {
 
     Field {
         receiver: Box<HirExpr>,
+        struct_id: StructId,
         field: usize,
     },
 }

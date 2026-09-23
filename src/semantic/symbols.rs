@@ -21,6 +21,16 @@ pub struct StructSymbol {
     pub fields: Vec<FieldSymbol>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ConstructorId(pub usize);
+
+#[derive(Debug, Clone)]
+pub struct ConstructorSymbol {
+    pub id: ConstructorId,
+    pub owner: StructId,
+    pub parameters: Vec<ParameterSymbol>,
+}
+
 #[derive(Debug, Clone)]
 pub struct FieldSymbol {
     pub name: String,
@@ -54,6 +64,7 @@ pub struct SymbolTable {
     functions: Vec<FunctionSymbol>,
     struct_names: HashMap<String, StructId>,
     function_names: HashMap<String, FunctionId>,
+    constructors: Vec<ConstructorSymbol>,
     method_names: HashMap<(StructId, String), FunctionId>,
 }
 

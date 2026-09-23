@@ -1,4 +1,4 @@
-use crate::{compiler::source::Span, semantic::modifiers::Visibility};
+use crate::{ compiler::source::Span, semantic::modifiers::Visibility };
 
 #[derive(Debug, Clone)]
 pub struct Program {
@@ -12,6 +12,7 @@ pub struct StructDecl {
     pub base: Option<String>,
     pub fields: Vec<FieldDecl>,
     pub methods: Vec<FunctionDecl>,
+    pub constructors: Vec<ConstructorDecl>,
     pub span: Span,
 }
 
@@ -20,6 +21,14 @@ pub struct FieldDecl {
     pub name: String,
     pub ty: TypeName,
     pub visibility: Visibility,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConstructorDecl {
+    pub params: Vec<Param>,
+    pub base_arguments: Vec<Expr>,
+    pub body: Stmt,
     pub span: Span,
 }
 
@@ -96,6 +105,12 @@ pub enum Stmt {
     Continue {
         span: Span,
     },
+
+    New {
+        name: String,
+        arguments: Vec<Expr>,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -139,17 +154,24 @@ pub enum Expr {
         arguments: Vec<Expr>,
         span: Span,
     },
+    
+    New {
+        name: String,
+        arguments: Vec<Expr>,
+        span: Span,
+    }
 }
 
 impl Expr {
     pub fn span(&self) -> Span {
         match self {
-            Expr::Integer { span, .. }
+            | Expr::Integer { span, .. }
             | Expr::String { span, .. }
             | Expr::Bool { span, .. }
             | Expr::Identifier { span, .. }
             | Expr::Member { span, .. }
             | Expr::Binary { span, .. }
+            | Expr::New { span, ..  }
             | Expr::Call { span, .. } => *span,
         }
     }

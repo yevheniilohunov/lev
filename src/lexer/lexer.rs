@@ -215,6 +215,8 @@ impl<'a> Lexer<'a> {
             "extends"  => TokenKind::Extends,
             "struct" => TokenKind::Struct,
             "fn" => TokenKind::Fn,
+            "constructor" => TokenKind::Constructor,
+            "base" => TokenKind::Base,
             "let" => TokenKind::Let,
             "const" => TokenKind::Const,
             "return" => TokenKind::Return,
@@ -236,6 +238,8 @@ impl<'a> Lexer<'a> {
             "public" => TokenKind::Public,
             "private" => TokenKind::Private,
             "protected" => TokenKind::Protected,
+
+            "new" => TokenKind::New,
 
             _ => TokenKind::Identifier(text.to_string()),
         };

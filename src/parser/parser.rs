@@ -1,5 +1,6 @@
 use crate::{
     compiler::{ error::CompilerError, source::{ SourceFile, Span } },
+    parser::ast::ConstructorDecl,
     semantic::modifiers::Visibility,
 };
 
@@ -80,13 +81,16 @@ impl<'a> Parser<'a> {
         };
 
         self.expect(&TokenKind::LeftBrace, "expected '{'")?;
-    
 
         let mut fields = Vec::new();
+        let mut constructors = Vec::new();
         let mut methods = Vec::new();
 
         while !self.check(&TokenKind::RightBrace) && !self.check(&TokenKind::Eof) {
-            if self.check(&TokenKind::Fn) {
+            if self.check(&TokenKind::Constructor) {
+                let constructor = self.parse_constructor()?;
+                constructors.push(constructor);
+            } else if self.check(&TokenKind::Fn) {
                 let method = self.parse_function()?;
                 methods.push(method);
             } else {
@@ -102,6 +106,62 @@ impl<'a> Parser<'a> {
             base,
             fields,
             methods,
+            constructors,
+            span: Span::new(start, self.previous_span().end),
+        })
+    }
+
+    fn parse_constructor(&mut self) -> Result<ConstructorDecl, CompilerError> {
+        let start = self.current_span().start;
+
+        self.expect(&TokenKind::Constructor, "expected 'constructor'")?;
+
+        self.expect(&TokenKind::LeftParen, "expected '(' after 'constructor'")?;
+
+        let mut params = Vec::new();
+
+        if !self.check(&TokenKind::RightParen) {
+            loop {
+                let param_start = self.current_span().start;
+
+                let param_name = self.expect_identifier("expected parameter name")?;
+
+                self.expect(&TokenKind::Colon, "expected ':' after parameter name")?;
+
+                let ty = self.parse_type()?;
+
+                params.push(Param {
+                    name: param_name,
+                    ty,
+                    span: Span::new(param_start, self.previous_span().end),
+                });
+
+                if !self.consume(&TokenKind::Comma) {
+                    break;
+                }
+            }
+        }
+
+        self.expect(&TokenKind::RightParen, "expected ')'")?;
+
+        let base_arguments = if self.consume(&TokenKind::Colon) {
+            self.expect(&TokenKind::Base, "expected 'base' after ':'")?;
+
+            self.expect(&TokenKind::LeftParen, "expected '(' after 'base'")?;
+
+            let arguments = self.parse_call_arguments()?;
+
+            arguments
+        } else {
+            Vec::new()
+        };
+
+        let body = self.parse_block()?;
+
+        Ok(ConstructorDecl {
+            params,
+            base_arguments,
+            body,
             span: Span::new(start, self.previous_span().end),
         })
     }
@@ -514,6 +574,19 @@ impl<'a> Parser<'a> {
         let token = self.advance();
 
         let mut expression = match token.kind {
+            TokenKind::New => {
+                let name = self.expect_identifier("expected struct name after 'new'")?;
+
+                self.expect(&TokenKind::LeftParen, "expected '(' after struct name")?;
+
+                let arguments = self.parse_call_arguments()?;
+
+                Expr::New {
+                    name,
+                    arguments,
+                    span: Span::new(token.span.start, self.previous_span().end),
+                }
+            }
             TokenKind::Integer(value) =>
                 Expr::Integer {
                     value,
@@ -708,6 +781,7 @@ fn expression_start(expr: &Expr) -> usize {
         | Expr::Identifier { span, .. }
         | Expr::Binary { span, .. }
         | Expr::Member { span, .. }
+        | Expr::New { span, .. }
         | Expr::Call { span, .. } => span.start,
     }
 }
@@ -720,6 +794,7 @@ fn expression_end(expr: &Expr) -> usize {
         | Expr::Identifier { span, .. }
         | Expr::Binary { span, .. }
         | Expr::Member { span, .. }
+        | Expr::New { span, .. }
         | Expr::Call { span, .. } => span.end,
     }
 }

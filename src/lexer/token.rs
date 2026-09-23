@@ -16,6 +16,8 @@ pub enum TokenKind {
     Extends,
     Struct,
     Fn,
+    Constructor,
+    Base,
     Let,
     Const,
     Return,
@@ -56,6 +58,8 @@ pub enum TokenKind {
     Public,
     Private,
     Protected,
+
+    New,
 
     Eof,
 }

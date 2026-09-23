@@ -84,6 +84,39 @@ impl SymbolTable {
         Ok(id)
     }
 
+    pub fn add_constructor(
+        &mut self,
+        owner: StructId,
+        parameters: Vec<ParameterSymbol>
+    ) -> Result<ConstructorId, String> {
+        if self.constructors.iter().any(|constructor| constructor.owner == owner) {
+            let struct_name = self.struct_symbol(owner).name.clone();
+
+            return Err(format!("struct '{}' already has a constructor", struct_name));
+        }
+
+        let id = ConstructorId(self.constructors.len());
+
+        self.constructors.push(ConstructorSymbol {
+            id,
+            owner,
+            parameters,
+        });
+
+        Ok(id)
+    }
+
+    pub fn find_constructor(&self, owner: StructId) -> Option<ConstructorId> {
+        self.constructors
+            .iter()
+            .find(|constructor| constructor.owner == owner)
+            .map(|constructor| constructor.id)
+    }
+
+    pub fn constructor_symbol(&self, id: ConstructorId) -> &ConstructorSymbol {
+        &self.constructors[id.0]
+    }
+
     pub fn set_struct_base(&mut self, id: StructId, base: StructId) {
         self.structs[id.0].base = Some(base);
     }
@@ -188,7 +221,7 @@ impl SymbolTable {
 
         None
     }
-    
+
     pub fn struct_symbol(&self, id: StructId) -> &StructSymbol {
         &self.structs[id.0]
     }

@@ -1,6 +1,7 @@
 use std::fmt;
 
 use crate::compiler::source::Span;
+use crate::semantic::symbols::ConstructorId;
 
 use super::symbols::{ FunctionId, LocalId, StructId };
 
@@ -27,7 +28,8 @@ pub struct HirField {
 }
 
 #[derive(Debug)] pub struct HirFunction { 
-    pub id: FunctionId, 
+    pub id: Option<FunctionId>,
+    pub constructor_id: Option<ConstructorId>,
     pub name: String, 
     // None for top-level functions. 
     // Some(struct_id) for struct methods. 
@@ -130,8 +132,14 @@ pub enum HirExprKind {
         arguments: Vec<HirExpr>,
     },
 
+    ConstructorCall {
+        constructor: ConstructorId,
+        arguments: Vec<HirExpr>,
+    },
+
     StructInit {
         struct_id: StructId,
+        constructor: Option<ConstructorId>,
         arguments: Vec<HirExpr>,
     },
 

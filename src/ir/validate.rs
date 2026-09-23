@@ -80,7 +80,7 @@ impl<'a> Validator<'a> {
 
         for function in &self.program.functions {
             if !ids.insert(function.id) {
-                self.error(format!("duplicate function id #{}", function.id.0));
+                self.error(format!("duplicate function id #{}", function.id.unwrap().0));
             }
         }
     }
@@ -214,7 +214,7 @@ impl<'a> Validator<'a> {
     fn validate_calls(&mut self, function: &IrFunction) {
         let functions: HashSet<FunctionId> = self.program.functions
             .iter()
-            .map(|function| function.id)
+            .map_while(|function| function.id)
             .collect();
 
         for block in &function.blocks {

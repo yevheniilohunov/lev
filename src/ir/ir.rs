@@ -26,7 +26,7 @@ pub struct IrField {
 
 #[derive(Debug, Clone, Default)]
 pub struct IrFunction {
-    pub id: FunctionId,
+    pub id: Option<FunctionId>,
     pub name: String,
     pub owner: Option<StructId>,
     pub parameters: Vec<IrLocal>,
@@ -261,7 +261,7 @@ impl fmt::Display for IrProgram {
                     writeln!(
                         f,
                         "fn #{} {}::{}: {:?} {{",
-                        function.id.0,
+                        function.id.unwrap().0,
                         owner.0,
                         function.name,
                         function.return_type
@@ -271,7 +271,7 @@ impl fmt::Display for IrProgram {
                     writeln!(
                         f,
                         "fn #{} {}: {:?} {{",
-                        function.id.0,
+                        function.id.unwrap().0,
                         function.name,
                         function.return_type
                     )?;

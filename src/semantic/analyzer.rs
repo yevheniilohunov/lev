@@ -68,14 +68,46 @@ impl<'a> Analyzer<'a> {
             self.collect_function_signature(function, None);
         }
 
-        // Register methods declared inside structs.
         for struct_decl in &program.structs {
             let Some(struct_id) = self.symbols.find_struct(&struct_decl.name) else {
                 continue;
             };
+
             for method in &struct_decl.methods {
                 self.collect_function_signature(method, Some(struct_id));
             }
+
+            for constructor in &struct_decl.constructors {
+                self.collect_constructor_signature(constructor, struct_id);
+            }
+        }
+    }
+
+    fn collect_constructor_signature(&mut self, constructor: &ConstructorDecl, owner: StructId) {
+        let mut parameters = Vec::new();
+        let mut seen_parameters = HashSet::new();
+
+        for parameter in &constructor.params {
+            if !seen_parameters.insert(parameter.name.clone()) {
+                self.errors.push(
+                    self.error_at(
+                        format!("parameter '{}' is duplicated", parameter.name),
+                        parameter.span
+                    )
+                );
+                continue;
+            }
+
+            if let Some(ty) = self.resolve_type(&parameter.ty, parameter.span) {
+                parameters.push(ParameterSymbol {
+                    name: parameter.name.clone(),
+                    ty,
+                });
+            }
+        }
+
+        if let Err(error) = self.symbols.add_constructor(owner, parameters) {
+            self.errors.push(self.error_at(error, constructor.span));
         }
     }
 
@@ -208,6 +240,16 @@ impl<'a> Analyzer<'a> {
                 let hir_function = self.analyze_function(method, function_id);
                 hir_functions.push(hir_function);
             }
+
+            for constructor in &struct_decl.constructors {
+                let Some(constructor_id) = self.symbols.find_constructor(struct_id) else {
+                    continue;
+                };
+
+                let hir_function = self.analyze_constructor(constructor, constructor_id, struct_id);
+
+                hir_functions.push(hir_function);
+            }
         }
 
         for function in &program.functions {
@@ -222,6 +264,233 @@ impl<'a> Analyzer<'a> {
         HirProgram {
             structs: hir_structs,
             functions: hir_functions,
+        }
+    }
+
+    fn analyze_constructor(
+        &mut self,
+        constructor: &ConstructorDecl,
+        constructor_id: ConstructorId,
+        owner: StructId
+    ) -> HirFunction {
+        let symbol = self.symbols.constructor_symbol(constructor_id).clone();
+
+        let mut scope = Scope::new();
+        let mut params = Vec::new();
+
+        let receiver_name = "self".to_string();
+        let receiver_type = Type::Struct(owner);
+
+        match scope.declare(receiver_name.clone(), receiver_type.clone(), true) {
+            Ok(local) => {
+                params.push(HirParam {
+                    local,
+                    name: receiver_name,
+                    ty: receiver_type,
+                });
+            }
+            Err(error) => {
+                self.errors.push(self.error_at(error, constructor.span));
+            }
+        }
+
+        for parameter in &symbol.parameters {
+            match scope.declare(parameter.name.clone(), parameter.ty.clone(), true) {
+                Ok(local) => {
+                    params.push(HirParam {
+                        local,
+                        name: parameter.name.clone(),
+                        ty: parameter.ty.clone(),
+                    });
+                }
+                Err(error) => {
+                    self.errors.push(self.error_at(error, constructor.span));
+                }
+            }
+        }
+
+        let mut base_call = None;
+
+        if !constructor.base_arguments.is_empty() {
+            let Some(base_struct_id) = self.symbols.struct_base(owner) else {
+                self.errors.push(
+                    self.error_at(
+                        "constructor forwards arguments to base, but this struct has no base struct",
+                        constructor.span
+                    )
+                );
+
+                return self.build_constructor_hir_function(
+                    constructor,
+                    constructor_id,
+                    owner,
+                    params,
+                    scope,
+                    HirBlock {
+                        statements: Vec::new(),
+                    }
+                );
+            };
+
+            let Some(base_constructor_id) = self.symbols.find_constructor(base_struct_id) else {
+                self.errors.push(
+                    self.error_at(
+                        format!(
+                            "base struct '{}' has no constructor",
+                            self.symbols.struct_symbol(base_struct_id).name
+                        ),
+                        constructor.span
+                    )
+                );
+
+                return self.build_constructor_hir_function(
+                    constructor,
+                    constructor_id,
+                    owner,
+                    params,
+                    scope,
+                    HirBlock {
+                        statements: Vec::new(),
+                    }
+                );
+            };
+
+            let base_constructor = self.symbols.constructor_symbol(base_constructor_id).clone();
+
+            if constructor.base_arguments.len() != base_constructor.parameters.len() {
+                self.errors.push(
+                    self.error_at(
+                        format!(
+                            "base constructor '{}' expects {} argument(s), found {}",
+                            self.symbols.struct_symbol(base_struct_id).name,
+                            base_constructor.parameters.len(),
+                            constructor.base_arguments.len()
+                        ),
+                        constructor.span
+                    )
+                );
+            }
+
+            let mut arguments = Vec::with_capacity(constructor.base_arguments.len() + 1);
+
+            let self_local = match scope.lookup("self") {
+                Some(local) => local,
+                None => {
+                    self.errors.push(
+                        self.error_at(
+                            "internal error: constructor receiver 'self' was not declared",
+                            constructor.span
+                        )
+                    );
+
+                    return self.build_constructor_hir_function(
+                        constructor,
+                        constructor_id,
+                        owner,
+                        params,
+                        scope,
+                        HirBlock {
+                            statements: Vec::new(),
+                        }
+                    );
+                }
+            };
+
+            arguments.push(HirExpr {
+                kind: HirExprKind::Local(self_local),
+                ty: Type::Struct(owner),
+                span: constructor.span,
+            });
+
+            for (index, argument) in constructor.base_arguments.iter().enumerate() {
+                let value = self.analyze_expr(argument, &scope);
+
+                if let Some(parameter) = base_constructor.parameters.get(index) {
+                    if value.ty != parameter.ty {
+                        self.errors.push(
+                            self.error_at(
+                                format!(
+                                    "argument {} of base constructor '{}' has type {:?}, expected {:?}",
+                                    index + 1,
+                                    self.symbols.struct_symbol(base_struct_id).name,
+                                    value.ty,
+                                    parameter.ty
+                                ),
+                                value.span
+                            )
+                        );
+                    }
+                }
+
+                arguments.push(value);
+            }
+
+            base_call = Some(
+                HirStmt::Expr(HirExpr {
+                    kind: HirExprKind::ConstructorCall {
+                        constructor: base_constructor_id,
+                        arguments,
+                    },
+                    ty: Type::Void,
+                    span: constructor.span,
+                })
+            );
+        }
+
+        let body = match self.analyze_block(&constructor.body, &mut scope, &Type::Void, 0) {
+            Ok(mut body) => {
+                if let Some(base_call) = base_call {
+                    body.statements.insert(0, base_call);
+                }
+
+                body
+            }
+
+            Err(errors) => {
+                self.errors.extend(errors);
+
+                let mut statements = Vec::new();
+
+                if let Some(base_call) = base_call {
+                    statements.push(base_call);
+                }
+
+                HirBlock { statements }
+            }
+        };
+
+        self.build_constructor_hir_function(constructor, constructor_id, owner, params, scope, body)
+    }
+
+    fn build_constructor_hir_function(
+        &self,
+        _constructor: &ConstructorDecl,
+        constructor_id: ConstructorId,
+        owner: StructId,
+        params: Vec<HirParam>,
+        scope: Scope,
+        body: HirBlock
+    ) -> HirFunction {
+        let locals = scope
+            .locals()
+            .iter()
+            .filter(|(id, _, _, _)| { !params.iter().any(|param| param.local == *id) })
+            .map(|(id, name, ty, _)| HirLocal {
+                id: *id,
+                name: name.clone(),
+                ty: ty.clone(),
+            })
+            .collect();
+
+        HirFunction {
+            id: None,
+            constructor_id: Some(constructor_id),
+            name: "constructor".to_string(),
+            owner: Some(owner),
+            params,
+            locals,
+            return_type: Type::Void,
+            body,
         }
     }
 
@@ -241,7 +510,7 @@ impl<'a> Analyzer<'a> {
         let mut params = Vec::new();
 
         if let Some(owner) = symbol.owner {
-            let receiver_name = "self".to_string();
+            let receiver_name = "this.".to_string();
             let receiver_type = Type::Struct(owner);
 
             match scope.declare(receiver_name.clone(), receiver_type.clone(), true) {
@@ -299,7 +568,8 @@ impl<'a> Analyzer<'a> {
         self.current_owner = None;
 
         HirFunction {
-            id: function_id,
+            id: Some(function_id),
+            constructor_id: None,
             name: symbol.name,
             owner: symbol.owner,
             params,
@@ -921,7 +1191,6 @@ impl<'a> Analyzer<'a> {
                         span: *span,
                     }
                 } else {
-                   
                     let Some(function_id) = self.symbols.find_function(name) else {
                         self.errors.push(
                             self.error_at(format!("unknown function '{}'", name), *span)
@@ -1057,6 +1326,7 @@ impl<'a> Analyzer<'a> {
                     span: *span,
                 }
             }
+
             Expr::New { name, arguments, span } => {
                 let Some(struct_id) = self.symbols.find_struct(name) else {
                     self.errors.push(self.error_at(format!("unknown struct '{}'", name), *span));
@@ -1068,24 +1338,76 @@ impl<'a> Analyzer<'a> {
                     };
                 };
 
-                let structure = self.symbols.struct_symbol(struct_id).clone();
+                let Some(constructor_id) = self.symbols.find_constructor(struct_id) else {
+                    if !arguments.is_empty() {
+                        self.errors.push(
+                            self.error_at(
+                                format!(
+                                    "struct '{}' has no constructor accepting {} argument(s)",
+                                    name,
+                                    arguments.len()
+                                ),
+                                *span
+                            )
+                        );
+                    }
 
-                /*
-                 * Constructor lookup is not implemented in SymbolTable yet.
-                 *
-                 * For the moment, this validates the `new` target and preserves
-                 * the constructor arguments for HIR. Constructor overload
-                 * resolution will be added once constructor symbols exist.
-                 */
+                    return HirExpr {
+                        kind: HirExprKind::StructInit {
+                            struct_id,
+                            constructor: None,
+                            arguments: Vec::new(),
+                        },
+                        ty: Type::Struct(struct_id),
+                        span: *span,
+                    };
+                };
+
+                let constructor = self.symbols.constructor_symbol(constructor_id).clone();
+
+                if arguments.len() != constructor.parameters.len() {
+                    self.errors.push(
+                        self.error_at(
+                            format!(
+                                "constructor '{}' expects {} argument(s), found {}",
+                                name,
+                                constructor.parameters.len(),
+                                arguments.len()
+                            ),
+                            *span
+                        )
+                    );
+                }
+
                 let mut analyzed_arguments = Vec::with_capacity(arguments.len());
 
-                for argument in arguments {
-                    analyzed_arguments.push(self.analyze_expr(argument, scope));
+                for (index, argument) in arguments.iter().enumerate() {
+                    let value = self.analyze_expr(argument, scope);
+
+                    if let Some(parameter) = constructor.parameters.get(index) {
+                        if value.ty != parameter.ty {
+                            self.errors.push(
+                                self.error_at(
+                                    format!(
+                                        "argument {} of constructor '{}' has type {:?}, expected {:?}",
+                                        index + 1,
+                                        name,
+                                        value.ty,
+                                        parameter.ty
+                                    ),
+                                    value.span
+                                )
+                            );
+                        }
+                    }
+
+                    analyzed_arguments.push(value);
                 }
 
                 HirExpr {
                     kind: HirExprKind::StructInit {
                         struct_id,
+                        constructor: Some(constructor_id),
                         arguments: analyzed_arguments,
                     },
                     ty: Type::Struct(struct_id),

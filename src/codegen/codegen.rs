@@ -139,7 +139,7 @@ struct FunctionCodegen<'a> {
     value_slots: HashMap<ValueId, i32>,
     edge_copies: HashMap<BlockId, Vec<(ValueId, ValueId)>>,
     struct_storage: HashMap<ValueId, i32>,
-    function_names: &'a HashMap<FunctionId, String>,
+    function_names: &'a HashMap<Option<FunctionId>, String>,
     next_stack_offset: i32,
     target: CodegenTarget,
     phi_temp_offset: i32,
@@ -151,7 +151,7 @@ impl<'a> FunctionCodegen<'a> {
         output: &'a mut String,
         program: &'a IrProgram,
         function: &'a IrFunction,
-        function_names: &'a HashMap<FunctionId, String>,
+        function_names: &'a HashMap<Option<FunctionId>, String>,
         string_labels: &'a BTreeMap<String, String>,
         target: CodegenTarget
     ) -> Self {
@@ -655,7 +655,7 @@ impl<'a> FunctionCodegen<'a> {
                 }
 
                 let function_name = self.function_names
-                    .get(function)
+                    .get(&Some(*function))
                     .ok_or_else(|| {
                         vec![CompilerError::internal(format!("unknown function id {:?}", function))]
                     })?;
@@ -997,7 +997,7 @@ fn generate_function(
     output: &mut String,
     program: &IrProgram,
     function: &IrFunction,
-    function_names: &HashMap<FunctionId, String>,
+    function_names: &HashMap<Option<FunctionId>, String>,
     string_labels: &BTreeMap<String, String>,
     target: CodegenTarget
 ) -> Result<(), Vec<CompilerError>> {

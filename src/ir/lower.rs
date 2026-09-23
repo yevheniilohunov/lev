@@ -1,4 +1,7 @@
-use crate::{ compiler::error::CompilerError, semantic::{ hir::*, symbols::StructId, types::Type } };
+use crate::{
+    compiler::error::CompilerError,
+    semantic::{ hir::*, symbols::{ ConstructorId, FunctionId, StructId }, types::Type },
+};
 
 use super::ir::*;
 
@@ -16,10 +19,46 @@ pub fn lower_to_ir(program: HirProgram) -> Result<IrProgram, Vec<CompilerError>>
         });
     }
 
+    /*
+     * Normal HIR functions already have FunctionIds.
+     *
+     * Constructors don't have FunctionIds yet; they have ConstructorIds.
+     * Assign runtime FunctionIds to constructors after the normal functions.
+     */
+    let mut next_function_id = program.functions
+        .iter()
+        .filter_map(|function| function.id)
+        .map(|id| id.0)
+        .max()
+        .map(|id| id + 1)
+        .unwrap_or(0);
+
+    let mut constructor_functions = Vec::new();
+
+    for function in &program.functions {
+        if let Some(constructor_id) = function.constructor_id {
+            constructor_functions.push((constructor_id, FunctionId(next_function_id)));
+
+            next_function_id += 1;
+        }
+    }
+
     let mut functions = Vec::with_capacity(program.functions.len());
 
     for function in &program.functions {
-        functions.push(lower_function(&program, function));
+        let function_id = if let Some(function_id) = function.id {
+            function_id
+        } else if let Some(constructor_id) = function.constructor_id {
+            constructor_functions
+                .iter()
+                .find(|(id, _)| *id == constructor_id)
+                .map(|(_, id)| *id)
+                .expect("constructor function id was not assigned")
+        } else {
+            continue;
+        };
+
+        functions.push(lower_function(&program, function, &constructor_functions, function_id));
     }
 
     Ok(IrProgram {
@@ -137,7 +176,12 @@ fn field_offset(
         structure.fields.iter().count().min(0)
 }
 
-fn lower_function(program: &HirProgram, function: &HirFunction) -> IrFunction {
+fn lower_function(
+    program: &HirProgram,
+    function: &HirFunction,
+    constructor_functions: &[(ConstructorId, FunctionId)],
+    function_id: FunctionId
+) -> IrFunction {
     let parameters = function.params
         .iter()
         .map(|param| IrLocal {
@@ -156,14 +200,8 @@ fn lower_function(program: &HirProgram, function: &HirFunction) -> IrFunction {
         })
         .collect();
 
-    let mut builder = FunctionBuilder::new(program);
+    let mut builder = FunctionBuilder::new(program, constructor_functions);
 
-    /*
-     * Parameters are definitions of their corresponding locals.
-     *
-     * They must be emitted before the normal function body so SSA
-     * construction has an initial definition for every parameter.
-     */
     for parameter in &function.params {
         let destination = builder.new_value();
 
@@ -177,7 +215,7 @@ fn lower_function(program: &HirProgram, function: &HirFunction) -> IrFunction {
     builder.finish();
 
     IrFunction {
-        id: function.id,
+        id: Some(function_id),
         name: function.name.clone(),
         owner: function.owner,
         parameters,
@@ -190,6 +228,7 @@ fn lower_function(program: &HirProgram, function: &HirFunction) -> IrFunction {
 
 struct FunctionBuilder<'a> {
     program: &'a HirProgram,
+    constructor_functions: &'a [(ConstructorId, FunctionId)],
     next_value: usize,
     blocks: Vec<BasicBlock>,
     current_block: BlockId,
@@ -202,9 +241,13 @@ struct LoopTargets {
 }
 
 impl<'a> FunctionBuilder<'a> {
-    fn new(program: &'a HirProgram) -> Self {
+    fn new(
+        program: &'a HirProgram,
+        constructor_functions: &'a [(ConstructorId, FunctionId)]
+    ) -> Self {
         Self {
             program,
+            constructor_functions,
             next_value: 0,
             blocks: vec![BasicBlock {
                 id: BlockId(0),
@@ -214,6 +257,13 @@ impl<'a> FunctionBuilder<'a> {
             current_block: BlockId(0),
             loop_targets: Vec::new(),
         }
+    }
+
+    fn constructor_function_id(&self, constructor_id: ConstructorId) -> Option<FunctionId> {
+        self.constructor_functions
+            .iter()
+            .find(|(id, _)| *id == constructor_id)
+            .map(|(_, function_id)| *function_id)
     }
 
     fn new_value(&mut self) -> ValueId {
@@ -531,7 +581,7 @@ impl<'a> FunctionBuilder<'a> {
 
                 destination
             }
-            
+
             HirExprKind::Field { receiver, struct_id, field } => {
                 let receiver_value = self.lower_expr(receiver)?;
 
@@ -566,7 +616,7 @@ impl<'a> FunctionBuilder<'a> {
                 Some(destination)
             }
 
-            HirExprKind::StructInit { struct_id, arguments } => {
+            HirExprKind::StructInit { struct_id, constructor, arguments } => {
                 let destination = self.new_value();
 
                 self.emit(IrInstruction::AllocStruct {
@@ -574,17 +624,57 @@ impl<'a> FunctionBuilder<'a> {
                     struct_id: *struct_id,
                 });
 
-                for (field, argument) in arguments.iter().enumerate() {
-                    let value = self.lower_expr(argument)?;
+                if let Some(constructor_id) = constructor {
+                    let function = match self.constructor_function_id(*constructor_id) {
+                        Some(function) => function,
+                        None => {
+                            return None;
+                        }
+                    };
 
-                    self.emit(IrInstruction::StoreField {
-                        receiver: destination,
-                        field,
-                        value,
+                    let mut values = Vec::with_capacity(arguments.len() + 1);
+
+                    /*
+                     * Constructors receive the object being constructed as
+                     * their first parameter (`self`).
+                     */
+                    values.push(destination);
+
+                    for argument in arguments {
+                        values.push(self.lower_expr(argument)?);
+                    }
+
+                    self.emit(IrInstruction::Call {
+                        destination: None,
+                        function,
+                        arguments: values,
                     });
                 }
 
                 Some(destination)
+            }
+
+            HirExprKind::ConstructorCall { constructor, arguments } => {
+                let function = match self.constructor_function_id(*constructor) {
+                    Some(function) => function,
+                    None => {
+                        return None;
+                    }
+                };
+
+                let mut values = Vec::with_capacity(arguments.len());
+
+                for argument in arguments {
+                    values.push(self.lower_expr(argument)?);
+                }
+
+                self.emit(IrInstruction::Call {
+                    destination: None,
+                    function,
+                    arguments: values,
+                });
+
+                None
             }
         }
     }

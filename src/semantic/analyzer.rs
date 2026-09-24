@@ -443,6 +443,10 @@ impl<'a> Analyzer<'a> {
                     body.statements.insert(0, base_call);
                 }
 
+                body.statements.push(HirStmt::Return {
+                    value: None,
+                });
+
                 body
             }
 
@@ -454,6 +458,10 @@ impl<'a> Analyzer<'a> {
                 if let Some(base_call) = base_call {
                     statements.push(base_call);
                 }
+
+                statements.push(HirStmt::Return {
+                    value: None,
+                });
 
                 HirBlock { statements }
             }
@@ -1747,7 +1755,7 @@ mod tests {
                         }
                     ]
                 )
-            ],
+            ]
         );
 
         let result = analyze(program, source);
@@ -1789,7 +1797,7 @@ mod tests {
                         }
                     ]
                 )
-            ],
+            ]
         );
 
         let result = analyze(program, source);

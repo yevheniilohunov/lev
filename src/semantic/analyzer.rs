@@ -278,7 +278,7 @@ impl<'a> Analyzer<'a> {
         let mut scope = Scope::new();
         let mut params = Vec::new();
 
-        let receiver_name = "self".to_string();
+        let receiver_name = "this".to_string();
         let receiver_type = Type::Struct(owner);
 
         match scope.declare(receiver_name.clone(), receiver_type.clone(), true) {
@@ -373,12 +373,12 @@ impl<'a> Analyzer<'a> {
 
             let mut arguments = Vec::with_capacity(constructor.base_arguments.len() + 1);
 
-            let self_local = match scope.lookup("self") {
+            let self_local = match scope.lookup("this") {
                 Some(local) => local,
                 None => {
                     self.errors.push(
                         self.error_at(
-                            "internal error: constructor receiver 'self' was not declared",
+                            "internal error: constructor receiver 'this' was not declared",
                             constructor.span
                         )
                     );
@@ -662,57 +662,135 @@ impl<'a> Analyzer<'a> {
         loop_depth: usize
     ) -> Result<HirStmt, Vec<CompilerError>> {
         match statement {
-            Stmt::Assign { name, value, span } => {
-                let local = match scope.lookup(name) {
-                    Some(local) => local,
-
-                    None => {
-                        return Err(
-                            vec![self.error_at(format!("unknown variable '{}'", name), *span)]
-                        );
-                    }
-                };
-
-                if !scope.is_mutable(local) {
-                    return Err(
-                        vec![
-                            self.error_at(
-                                format!("cannot assign to immutable variable '{}'", name),
-                                *span
-                            )
-                        ]
-                    );
-                }
-
-                let expected = match scope.type_of(local) {
-                    Some(ty) => ty.clone(),
-
-                    None => {
-                        return Err(
-                            vec![self.error_at("internal error: missing type for local", *span)]
-                        );
-                    }
-                };
-
+            Stmt::Assign { target, value, span } => {
                 let value = self.analyze_expr(value, scope);
 
-                if value.ty != expected {
-                    return Err(
-                        vec![
-                            self.error_at(
-                                format!(
-                                    "cannot assign {:?} to variable '{}' of type {:?}",
-                                    value.ty,
-                                    name,
-                                    expected
-                                ),
-                                *span
-                            )
-                        ]
-                    );
-                }
+                match target {
+                    Expr::Identifier { name, .. } => {
+                        let local = match scope.lookup(name) {
+                            Some(local) => local,
 
-                Ok(HirStmt::Assign { local, value })
+                            None => {
+                                return Err(
+                                    vec![self.error_at(format!("unknown target '{}'", name), *span)]
+                                );
+                            }
+                        };
+
+                        if !scope.is_mutable(local) {
+                            return Err(
+                                vec![
+                                    self.error_at(
+                                        format!("cannot assign to immutable variable '{}'", name),
+                                        *span
+                                    )
+                                ]
+                            );
+                        }
+
+                        let expected = match scope.type_of(local) {
+                            Some(ty) => ty.clone(),
+
+                            None => {
+                                return Err(
+                                    vec![
+                                        self.error_at(
+                                            "internal error: missing type for local",
+                                            *span
+                                        )
+                                    ]
+                                );
+                            }
+                        };
+
+                        if value.ty != expected {
+                            return Err(
+                                vec![
+                                    self.error_at(
+                                        format!(
+                                            "cannot assign {:?} to target '{}' of type {:?}",
+                                            value.ty,
+                                            name,
+                                            expected
+                                        ),
+                                        *span
+                                    )
+                                ]
+                            );
+                        }
+
+                        Ok(HirStmt::Assign {
+                            local,
+                            value,
+                        })
+                    }
+
+                    Expr::Member { receiver, name, span: field_span } => {
+                        let receiver = self.analyze_expr(receiver, scope);
+
+                        let struct_id = match receiver.ty {
+                            Type::Struct(struct_id) => struct_id,
+
+                            other => {
+                                return Err(
+                                    vec![
+                                        self.error_at(
+                                            format!(
+                                                "cannot assign field '{}' on value of type {:?}",
+                                                name,
+                                                other
+                                            ),
+                                            *field_span
+                                        )
+                                    ]
+                                );
+                            }
+                        };
+
+                        let Some((field_index, field)) = self.symbols.find_field(
+                            struct_id,
+                            name
+                        ) else {
+                            return Err(
+                                vec![
+                                    self.error_at(
+                                        format!(
+                                            "struct '{}' has no field '{}'",
+                                            self.symbols.struct_symbol(struct_id).name,
+                                            name
+                                        ),
+                                        *field_span
+                                    )
+                                ]
+                            );
+                        };
+
+                        if value.ty != field.ty {
+                            return Err(
+                                vec![
+                                    self.error_at(
+                                        format!(
+                                            "cannot assign {:?} to field '{}' of type {:?}",
+                                            value.ty,
+                                            name,
+                                            field.ty
+                                        ),
+                                        *span
+                                    )
+                                ]
+                            );
+                        }
+
+                        Ok(HirStmt::AssignField {
+                            receiver,
+                            struct_id,
+                            field: field_index,
+                            value,
+                        })
+                    }
+
+                    _ => { Err(vec![self.error_at("invalid assignment target", *span)]) }
+                }
             }
 
             Stmt::Block { .. } =>
@@ -1659,7 +1737,7 @@ mod tests {
                             span: span(),
                         },
                         Stmt::Assign {
-                            name: "x".to_string(),
+                            target: identifier("x"),
                             value: int(20),
                             span: span(),
                         },
@@ -1669,7 +1747,7 @@ mod tests {
                         }
                     ]
                 )
-            ]
+            ],
         );
 
         let result = analyze(program, source);
@@ -1687,6 +1765,7 @@ mod tests {
     #[test]
     fn rejects_assignment_type_mismatch() {
         let source = SourceFile::new("");
+
         let program = program(
             vec![
                 function(
@@ -1694,13 +1773,13 @@ mod tests {
                     TypeName::Int,
                     vec![
                         Stmt::Let {
-                            name: "x".to_string(),
+                            name: "x".to_owned().to_string(),
                             ty: TypeName::Int,
                             value: int(10),
                             span: span(),
                         },
                         Stmt::Assign {
-                            name: "x".to_string(),
+                            target: identifier("x"),
                             value: string("wrong"),
                             span: span(),
                         },
@@ -1710,7 +1789,7 @@ mod tests {
                         }
                     ]
                 )
-            ]
+            ],
         );
 
         let result = analyze(program, source);
@@ -1718,6 +1797,7 @@ mod tests {
         assert!(result.is_err());
 
         let errors = result.unwrap_err();
+
         assert!(
             errors.iter().any(|error| error.message.contains("cannot assign")),
             "expected assignment diagnostic, got {errors:?}"

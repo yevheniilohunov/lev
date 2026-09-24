@@ -51,7 +51,7 @@ pub struct Param {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
     Assign {
-        name: String,
+        target: Expr,
         value: Expr,
         span: Span,
     },
@@ -154,12 +154,12 @@ pub enum Expr {
         arguments: Vec<Expr>,
         span: Span,
     },
-    
+
     New {
         name: String,
         arguments: Vec<Expr>,
         span: Span,
-    }
+    },
 }
 
 impl Expr {
@@ -171,7 +171,7 @@ impl Expr {
             | Expr::Identifier { span, .. }
             | Expr::Member { span, .. }
             | Expr::Binary { span, .. }
-            | Expr::New { span, ..  }
+            | Expr::New { span, .. }
             | Expr::Call { span, .. } => *span,
         }
     }

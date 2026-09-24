@@ -391,7 +391,7 @@ impl<'a> Parser<'a> {
     fn parse_assignment_statement(&mut self) -> Result<Stmt, CompilerError> {
         let start = self.current_span().start;
 
-        let name = self.expect_identifier("expected variable name")?;
+        let target = self.parse_assignment_target()?;
 
         self.expect(&TokenKind::Equal, "expected '=' in assignment")?;
 
@@ -400,10 +400,35 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::Semicolon, "expected ';' after assignment")?;
 
         Ok(Stmt::Assign {
-            name,
+            target,
             value,
             span: Span::new(start, self.previous_span().end),
         })
+    }
+
+    fn parse_assignment_target(&mut self) -> Result<Expr, CompilerError> {
+        let start = self.current_span().start;
+
+        let name = self.expect_identifier("expected assignment target")?;
+
+        let mut target = Expr::Identifier {
+            name,
+            span: Span::new(start, self.previous_span().end),
+        };
+
+        while self.consume(&TokenKind::Dot) {
+            let name = self.expect_identifier("expected member name after '.'")?;
+
+            let end = self.previous_span().end;
+
+            target = Expr::Member {
+                receiver: Box::new(target),
+                name,
+                span: Span::new(start, end),
+            };
+        }
+
+        Ok(target)
     }
 
     fn parse_return_statement(&mut self) -> Result<Stmt, CompilerError> {
@@ -699,14 +724,56 @@ impl<'a> Parser<'a> {
     }
 
     fn is_assignment_statement(&self) -> bool {
+        let mut position = self.position;
+
+        // Assignment must start with an expression that can be a target.
+        match self.tokens.get(position).map(|token| &token.kind) {
+            Some(TokenKind::Identifier(_)) => {
+                position += 1;
+            }
+
+            _ => {
+                return false;
+            }
+        }
+
+        // Allow member access:
+        //
+        // identifier.name = ...
+        //
+        // This also allows:
+        //
+        // this.name = ...
+        // object.field = ...
+        //
+        loop {
+            let is_dot = matches!(
+                self.tokens.get(position).map(|token| &token.kind),
+                Some(TokenKind::Dot)
+            );
+
+            if !is_dot {
+                break;
+            }
+
+            position += 1;
+
+            if
+                !matches!(
+                    self.tokens.get(position).map(|token| &token.kind),
+                    Some(TokenKind::Identifier(_))
+                )
+            {
+                return false;
+            }
+
+            position += 1;
+        }
+
         matches!(
-            self.tokens.get(self.position).map(|token| &token.kind),
-            Some(TokenKind::Identifier(_))
-        ) &&
-            matches!(
-                self.tokens.get(self.position + 1).map(|token| &token.kind),
-                Some(TokenKind::Equal)
-            )
+            self.tokens.get(position).map(|token| &token.kind),
+            Some(TokenKind::Equal)
+        )
     }
 
     fn expect_identifier(&mut self, message: &str) -> Result<String, CompilerError> {

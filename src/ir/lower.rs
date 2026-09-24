@@ -386,6 +386,37 @@ impl<'a> FunctionBuilder<'a> {
                     self.terminate(Terminator::Jump(targets.condition));
                 }
             }
+            HirStmt::AssignField { receiver, struct_id, field, value } => {
+                let receiver_struct = match receiver.ty {
+                    Type::Struct(id) => id,
+                    _ => {
+                        return;
+                    }
+                };
+
+                let Some(receiver_value) = self.lower_expr(receiver) else {
+                    return;
+                };
+
+                let Some(value) = self.lower_expr(value) else {
+                    return;
+                };
+
+                let physical_field = match
+                    physical_field_index(&self.program.structs, receiver_struct, *struct_id, *field)
+                {
+                    Ok(index) => index,
+                    Err(_) => {
+                        return;
+                    }
+                };
+
+                self.emit(IrInstruction::StoreField {
+                    receiver: receiver_value,
+                    field: physical_field,
+                    value,
+                });
+            }
         }
     }
 

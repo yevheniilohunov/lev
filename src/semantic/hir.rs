@@ -66,6 +66,13 @@ pub enum HirStmt {
         value: HirExpr,
     },
 
+    AssignField {
+        receiver: HirExpr,
+        struct_id: StructId,
+        field: usize,
+        value: HirExpr,
+    },
+
     Let {
         local: LocalId,
         value: HirExpr,

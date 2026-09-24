@@ -77,8 +77,14 @@ impl<'a> Analyzer<'a> {
                 self.collect_function_signature(method, Some(struct_id));
             }
 
-            for constructor in &struct_decl.constructors {
-                self.collect_constructor_signature(constructor, struct_id);
+            if struct_decl.constructors.is_empty() {
+                if let Err(error) = self.symbols.add_constructor(struct_id, Vec::new()) {
+                    self.errors.push(self.error_at(error, struct_decl.span));
+                }
+            } else {
+                for constructor in &struct_decl.constructors {
+                    self.collect_constructor_signature(constructor, struct_id);
+                }
             }
         }
     }
@@ -241,14 +247,42 @@ impl<'a> Analyzer<'a> {
                 hir_functions.push(hir_function);
             }
 
-            for constructor in &struct_decl.constructors {
+            if struct_decl.constructors.is_empty() {
                 let Some(constructor_id) = self.symbols.find_constructor(struct_id) else {
                     continue;
                 };
 
-                let hir_function = self.analyze_constructor(constructor, constructor_id, struct_id);
+                let constructor = ConstructorDecl {
+                    params: Vec::new(),
+                    base_arguments: Vec::new(),
+                    body: Stmt::Block {
+                        statements: Vec::new(),
+                        span: struct_decl.span,
+                    },
+                    span: struct_decl.span,
+                };
+
+                let hir_function = self.analyze_constructor(
+                    &constructor,
+                    constructor_id,
+                    struct_id
+                );
 
                 hir_functions.push(hir_function);
+            } else {
+                for constructor in &struct_decl.constructors {
+                    let Some(constructor_id) = self.symbols.find_constructor(struct_id) else {
+                        continue;
+                    };
+
+                    let hir_function = self.analyze_constructor(
+                        constructor,
+                        constructor_id,
+                        struct_id
+                    );
+
+                    hir_functions.push(hir_function);
+                }
             }
         }
 
@@ -430,6 +464,111 @@ impl<'a> Analyzer<'a> {
                     kind: HirExprKind::ConstructorCall {
                         constructor: base_constructor_id,
                         arguments,
+                    },
+                    ty: Type::Void,
+                    span: constructor.span,
+                })
+            );
+                } else if let Some(base_struct_id) = self.symbols.struct_base(owner) {
+            let Some(base_constructor_id) =
+                self.symbols.find_constructor(base_struct_id)
+            else {
+                self.errors.push(
+                    self.error_at(
+                        format!(
+                            "base struct '{}' has no constructor",
+                            self.symbols.struct_symbol(base_struct_id).name
+                        ),
+                        constructor.span
+                    )
+                );
+
+                return self.build_constructor_hir_function(
+                    constructor,
+                    constructor_id,
+                    owner,
+                    params,
+                    scope,
+                    HirBlock {
+                        statements: vec![
+                            HirStmt::Return {
+                                value: None,
+                            }
+                        ],
+                    }
+                );
+            };
+
+            let base_constructor =
+                self.symbols.constructor_symbol(base_constructor_id).clone();
+
+            if !base_constructor.parameters.is_empty() {
+                self.errors.push(
+                    self.error_at(
+                        format!(
+                            "base constructor '{}' requires {} argument(s), so '{}' cannot use an implicit base constructor call",
+                            self.symbols.struct_symbol(base_struct_id).name,
+                            base_constructor.parameters.len(),
+                            self.symbols.struct_symbol(owner).name
+                        ),
+                        constructor.span
+                    )
+                );
+
+                return self.build_constructor_hir_function(
+                    constructor,
+                    constructor_id,
+                    owner,
+                    params,
+                    scope,
+                    HirBlock {
+                        statements: vec![
+                            HirStmt::Return {
+                                value: None,
+                            }
+                        ],
+                    }
+                );
+            }
+
+            let self_local = match scope.lookup("this") {
+                Some(local) => local,
+                None => {
+                    self.errors.push(
+                        self.error_at(
+                            "internal error: constructor receiver 'this' was not declared",
+                            constructor.span
+                        )
+                    );
+
+                    return self.build_constructor_hir_function(
+                        constructor,
+                        constructor_id,
+                        owner,
+                        params,
+                        scope,
+                        HirBlock {
+                            statements: vec![
+                                HirStmt::Return {
+                                    value: None,
+                                }
+                            ],
+                        }
+                    );
+                }
+            };
+
+            base_call = Some(
+                HirStmt::Expr(HirExpr {
+                    kind: HirExprKind::ConstructorCall {
+                        constructor: base_constructor_id,
+                        arguments: vec![
+                            HirExpr {
+                                kind: HirExprKind::Local(self_local),
+                                ty: Type::Struct(owner),
+                                span: constructor.span,
+                            }
+                        ],
                     },
                     ty: Type::Void,
                     span: constructor.span,

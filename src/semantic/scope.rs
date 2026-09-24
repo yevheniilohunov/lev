@@ -1,7 +1,5 @@
 use std::collections::HashMap;
 
-use crate::parser::ast::Expr;
-
 use super::{ symbols::LocalId, types::Type };
 
 #[derive(Debug, Default)]
@@ -42,25 +40,6 @@ impl Scope {
         self.locals.push((id, name, ty, mutable));
 
         Ok(id)
-    }
-
-    pub fn lookup_target(&self, target: &Expr) -> Option<LocalId> {
-        let name = match target {
-            Expr::Integer { value, span } => todo!(),
-            Expr::String { value, span } => todo!(),
-            Expr::Bool { value, span } => todo!(),
-            Expr::Identifier { name, .. } => name,
-            Expr::Member { name, .. } => name,
-            Expr::Binary { op, left, right, span } => todo!(),
-            Expr::Call { name, .. } => name,
-            Expr::New { name, .. } => name,
-        };
-
-        self.scopes
-            .iter()
-            .rev()
-            .find_map(|scope| scope.get(name).copied())
-
     }
 
     pub fn lookup(&self, name: &str) -> Option<LocalId> {

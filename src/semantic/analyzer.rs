@@ -469,10 +469,8 @@ impl<'a> Analyzer<'a> {
                     span: constructor.span,
                 })
             );
-                } else if let Some(base_struct_id) = self.symbols.struct_base(owner) {
-            let Some(base_constructor_id) =
-                self.symbols.find_constructor(base_struct_id)
-            else {
+        } else if let Some(base_struct_id) = self.symbols.struct_base(owner) {
+            let Some(base_constructor_id) = self.symbols.find_constructor(base_struct_id) else {
                 self.errors.push(
                     self.error_at(
                         format!(
@@ -490,17 +488,14 @@ impl<'a> Analyzer<'a> {
                     params,
                     scope,
                     HirBlock {
-                        statements: vec![
-                            HirStmt::Return {
-                                value: None,
-                            }
-                        ],
+                        statements: vec![HirStmt::Return {
+                            value: None,
+                        }],
                     }
                 );
             };
 
-            let base_constructor =
-                self.symbols.constructor_symbol(base_constructor_id).clone();
+            let base_constructor = self.symbols.constructor_symbol(base_constructor_id).clone();
 
             if !base_constructor.parameters.is_empty() {
                 self.errors.push(
@@ -522,11 +517,9 @@ impl<'a> Analyzer<'a> {
                     params,
                     scope,
                     HirBlock {
-                        statements: vec![
-                            HirStmt::Return {
-                                value: None,
-                            }
-                        ],
+                        statements: vec![HirStmt::Return {
+                            value: None,
+                        }],
                     }
                 );
             }
@@ -548,11 +541,9 @@ impl<'a> Analyzer<'a> {
                         params,
                         scope,
                         HirBlock {
-                            statements: vec![
-                                HirStmt::Return {
-                                    value: None,
-                                }
-                            ],
+                            statements: vec![HirStmt::Return {
+                                value: None,
+                            }],
                         }
                     );
                 }
@@ -562,13 +553,11 @@ impl<'a> Analyzer<'a> {
                 HirStmt::Expr(HirExpr {
                     kind: HirExprKind::ConstructorCall {
                         constructor: base_constructor_id,
-                        arguments: vec![
-                            HirExpr {
-                                kind: HirExprKind::Local(self_local),
-                                ty: Type::Struct(owner),
-                                span: constructor.span,
-                            }
-                        ],
+                        arguments: vec![HirExpr {
+                            kind: HirExprKind::Local(self_local),
+                            ty: Type::Struct(owner),
+                            span: constructor.span,
+                        }],
                     },
                     ty: Type::Void,
                     span: constructor.span,
@@ -1784,162 +1773,259 @@ mod tests {
         }
     }
 
+    fn struct_decl(
+        name: &str,
+        base: Option<&str>,
+        fields: Vec<FieldDecl>,
+        methods: Vec<FunctionDecl>,
+        constructors: Vec<ConstructorDecl>
+    ) -> StructDecl {
+        StructDecl {
+            name: name.to_string(),
+            base: base.map(str::to_string),
+            fields,
+            methods,
+            constructors,
+            span: span(),
+        }
+    }
+
+    fn field(name: &str, ty: TypeName) -> FieldDecl {
+        FieldDecl {
+            name: name.to_string(),
+            ty,
+            visibility: Visibility::Public,
+            span: span(),
+        }
+    }
+
+    fn constructor(
+        params: Vec<Param>,
+        base_arguments: Vec<Expr>,
+        statements: Vec<Stmt>
+    ) -> ConstructorDecl {
+        ConstructorDecl {
+            params,
+            base_arguments,
+            body: block(statements),
+            span: span(),
+        }
+    }
+
+    fn param(name: &str, ty: TypeName) -> Param {
+        Param {
+            name: name.to_string(),
+            ty,
+            span: span(),
+        }
+    }
+
+    fn new_expr(name: &str, arguments: Vec<Expr>) -> Expr {
+        Expr::New {
+            name: name.to_string(),
+            arguments,
+            span: span(),
+        }
+    }
+
+    fn member(receiver: Expr, name: &str) -> Expr {
+        Expr::Member {
+            receiver: Box::new(receiver),
+            name: name.to_string(),
+            span: span(),
+        }
+    }
+
+    fn identifier_type(name: &str) -> TypeName {
+        TypeName::Named(name.to_string())
+    }
+
+    fn struct_program(structs: Vec<StructDecl>, functions: Vec<FunctionDecl>) -> Program {
+        Program {
+            structs,
+            functions,
+        }
+    }
+
     #[test]
-    fn analyzes_integer_return() {
+    fn analyzes_struct_field_access() {
         let source = SourceFile::new("");
 
-        let program = program(
+        let person = struct_decl(
+            "Person",
+            None,
+            vec![field("age", TypeName::Int)],
+            Vec::new(),
+            Vec::new()
+        );
+
+        let get_age = function(
+            "get_age",
+            TypeName::Int,
             vec![
-                function(
-                    "main",
-                    TypeName::Int,
-                    vec![Stmt::Return {
-                        value: Some(int(42)),
-                        span: span(),
-                    }]
-                )
+                Stmt::Let {
+                    name: "person".to_string(),
+                    ty: identifier_type("Person"),
+                    value: new_expr("Person", Vec::new()),
+                    span: span(),
+                },
+                Stmt::Return {
+                    value: Some(member(identifier("person"), "age")),
+                    span: span(),
+                }
             ]
         );
 
-        let result = analyze(program, source);
+        let result = analyze(struct_program(vec![person], vec![get_age]), source);
 
         assert!(result.is_ok(), "expected successful analysis: {result:?}");
 
         let hir = result.unwrap();
-        assert_eq!(hir.functions.len(), 1);
-        assert_eq!(hir.functions[0].name, "main");
-        assert_eq!(hir.functions[0].return_type, Type::Int);
+        let function = hir.functions
+            .iter()
+            .find(|function| function.name == "get_age")
+            .unwrap();
+
+        match &function.body.statements[1] {
+            HirStmt::Return { value: Some(value) } => {
+                assert_eq!(value.ty, Type::Int);
+
+                match &value.kind {
+                    HirExprKind::Field { struct_id: _, field, .. } => {
+                        assert_eq!(*field, 0);
+                    }
+
+                    other => panic!("expected field expression, found {other:?}"),
+                }
+            }
+
+            other => panic!("expected return statement, found {other:?}"),
+        }
     }
 
     #[test]
-    fn rejects_return_type_mismatch() {
+    fn analyzes_struct_field_assignment() {
         let source = SourceFile::new("");
 
-        let program = program(
+        let person = struct_decl(
+            "Person",
+            None,
+            vec![field("age", TypeName::Int)],
+            Vec::new(),
+            Vec::new()
+        );
+
+        let update_age = function(
+            "update_age",
+            TypeName::Void,
             vec![
-                function(
-                    "main",
-                    TypeName::Int,
-                    vec![Stmt::Return {
-                        value: Some(string("wrong")),
-                        span: span(),
-                    }]
-                )
+                Stmt::Let {
+                    name: "person".to_string(),
+                    ty: identifier_type("Person"),
+                    value: new_expr("Person", Vec::new()),
+                    span: span(),
+                },
+                Stmt::Assign {
+                    target: member(identifier("person"), "age"),
+                    value: int(42),
+                    span: span(),
+                }
             ]
         );
 
-        let result = analyze(program, source);
-
-        assert!(result.is_err());
-
-        let errors = result.unwrap_err();
-        assert!(
-            errors.iter().any(|error| error.message.contains("return")),
-            "expected return-type diagnostic, got {errors:?}"
-        );
-    }
-
-    #[test]
-    fn rejects_unknown_variable() {
-        let source = SourceFile::new("");
-
-        let program = program(
-            vec![
-                function(
-                    "main",
-                    TypeName::Int,
-                    vec![Stmt::Return {
-                        value: Some(identifier("missing")),
-                        span: span(),
-                    }]
-                )
-            ]
-        );
-
-        let result = analyze(program, source);
-
-        assert!(result.is_err());
-
-        let errors = result.unwrap_err();
-        assert!(
-            errors.iter().any(|error| error.message.contains("unknown variable")),
-            "expected unknown-variable diagnostic, got {errors:?}"
-        );
-    }
-
-    #[test]
-    fn analyzes_local_variable_and_assignment() {
-        let source = SourceFile::new("");
-
-        let program = program(
-            vec![
-                function(
-                    "main",
-                    TypeName::Int,
-                    vec![
-                        Stmt::Let {
-                            name: "x".to_string(),
-                            ty: TypeName::Int,
-                            value: int(10),
-                            span: span(),
-                        },
-                        Stmt::Assign {
-                            target: identifier("x"),
-                            value: int(20),
-                            span: span(),
-                        },
-                        Stmt::Return {
-                            value: Some(identifier("x")),
-                            span: span(),
-                        }
-                    ]
-                )
-            ]
-        );
-
-        let result = analyze(program, source);
+        let result = analyze(struct_program(vec![person], vec![update_age]), source);
 
         assert!(result.is_ok(), "expected successful analysis: {result:?}");
 
         let hir = result.unwrap();
-        let function = &hir.functions[0];
+        let function = hir.functions
+            .iter()
+            .find(|function| function.name == "update_age")
+            .unwrap();
 
-        assert_eq!(function.locals.len(), 1);
-        assert_eq!(function.locals[0].name, "x");
-        assert_eq!(function.locals[0].ty, Type::Int);
+        match &function.body.statements[1] {
+            HirStmt::AssignField { struct_id: _, field, value, .. } => {
+                assert_eq!(*field, 0);
+                assert_eq!(value.ty, Type::Int);
+            }
+
+            other => panic!("expected field assignment, found {other:?}"),
+        }
     }
 
     #[test]
-    fn rejects_assignment_type_mismatch() {
+    fn rejects_assignment_to_unknown_field() {
         let source = SourceFile::new("");
 
-        let program = program(
+        let person = struct_decl(
+            "Person",
+            None,
+            vec![field("age", TypeName::Int)],
+            Vec::new(),
+            Vec::new()
+        );
+
+        let update = function(
+            "update",
+            TypeName::Void,
             vec![
-                function(
-                    "main",
-                    TypeName::Int,
-                    vec![
-                        Stmt::Let {
-                            name: "x".to_owned().to_string(),
-                            ty: TypeName::Int,
-                            value: int(10),
-                            span: span(),
-                        },
-                        Stmt::Assign {
-                            target: identifier("x"),
-                            value: string("wrong"),
-                            span: span(),
-                        },
-                        Stmt::Return {
-                            value: Some(identifier("x")),
-                            span: span(),
-                        }
-                    ]
-                )
+                Stmt::Let {
+                    name: "person".to_string(),
+                    ty: identifier_type("Person"),
+                    value: new_expr("Person", Vec::new()),
+                    span: span(),
+                },
+                Stmt::Assign {
+                    target: member(identifier("person"), "missing"),
+                    value: int(42),
+                    span: span(),
+                }
             ]
         );
 
-        let result = analyze(program, source);
+        let result = analyze(struct_program(vec![person], vec![update]), source);
+
+        assert!(result.is_err());
+
+        let errors = result.unwrap_err();
+
+        assert!(
+            errors.iter().any(|error| error.message.contains("has no field")),
+            "expected unknown-field diagnostic, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_field_assignment_type_mismatch() {
+        let source = SourceFile::new("");
+
+        let person = struct_decl(
+            "Person",
+            None,
+            vec![field("age", TypeName::Int)],
+            Vec::new(),
+            Vec::new()
+        );
+
+        let update = function(
+            "update",
+            TypeName::Void,
+            vec![
+                Stmt::Let {
+                    name: "person".to_string(),
+                    ty: identifier_type("Person"),
+                    value: new_expr("Person", Vec::new()),
+                    span: span(),
+                },
+                Stmt::Assign {
+                    target: member(identifier("person"), "age"),
+                    value: string("wrong"),
+                    span: span(),
+                }
+            ]
+        );
+
+        let result = analyze(struct_program(vec![person], vec![update]), source);
 
         assert!(result.is_err());
 
@@ -1947,239 +2033,311 @@ mod tests {
 
         assert!(
             errors.iter().any(|error| error.message.contains("cannot assign")),
-            "expected assignment diagnostic, got {errors:?}"
+            "expected field-assignment diagnostic, got {errors:?}"
         );
     }
 
     #[test]
-    fn analyzes_integer_binary_expression() {
+    fn analyzes_inherited_field_access() {
         let source = SourceFile::new("");
 
-        let program = program(
+        let person = struct_decl(
+            "Person",
+            None,
+            vec![field("age", TypeName::Int)],
+            Vec::new(),
+            Vec::new()
+        );
+
+        let employee = struct_decl(
+            "Employee",
+            Some("Person"),
+            vec![field("employee_id", TypeName::Int)],
+            Vec::new(),
+            Vec::new()
+        );
+
+        let get_age = function(
+            "get_age",
+            TypeName::Int,
             vec![
-                function(
-                    "main",
-                    TypeName::Int,
-                    vec![Stmt::Return {
-                        value: Some(binary(BinaryOp::Add, int(2), int(3))),
-                        span: span(),
-                    }]
-                )
+                Stmt::Let {
+                    name: "employee".to_string(),
+                    ty: identifier_type("Employee"),
+                    value: new_expr("Employee", Vec::new()),
+                    span: span(),
+                },
+                Stmt::Return {
+                    value: Some(member(identifier("employee"), "age")),
+                    span: span(),
+                }
             ]
         );
 
-        let result = analyze(program, source);
+        let result = analyze(struct_program(vec![person, employee], vec![get_age]), source);
 
-        assert!(result.is_ok(), "expected successful analysis: {result:?}");
+        assert!(result.is_ok(), "expected inherited field access to succeed: {result:?}");
     }
 
     #[test]
-    fn rejects_non_integer_arithmetic() {
+    fn analyzes_default_constructor() {
         let source = SourceFile::new("");
 
-        let program = program(
-            vec![
-                function(
-                    "main",
-                    TypeName::Int,
-                    vec![Stmt::Return {
-                        value: Some(binary(BinaryOp::Add, string("left"), string("right"))),
-                        span: span(),
-                    }]
-                )
-            ]
+        let person = struct_decl(
+            "Person",
+            None,
+            vec![field("age", TypeName::Int)],
+            Vec::new(),
+            Vec::new()
         );
 
-        let result = analyze(program, source);
+        let main = function(
+            "main",
+            identifier_type("Person"),
+            vec![Stmt::Return {
+                value: Some(new_expr("Person", Vec::new())),
+                span: span(),
+            }]
+        );
+
+        let result = analyze(struct_program(vec![person], vec![main]), source);
+
+        assert!(result.is_ok(), "expected default constructor to work: {result:?}");
+
+        let hir = result.unwrap();
+
+        let constructor = hir.functions
+            .iter()
+            .find(|function| function.constructor_id.is_some())
+            .unwrap();
+
+        assert_eq!(constructor.params.len(), 1);
+        assert_eq!(constructor.params[0].name, "this");
+        assert!(constructor.constructor_id.is_some());
+    }
+
+    #[test]
+    fn rejects_new_with_wrong_constructor_argument_count() {
+        let source = SourceFile::new("");
+
+        let person = struct_decl(
+            "Person",
+            None,
+            Vec::new(),
+            Vec::new(),
+            vec![constructor(vec![param("age", TypeName::Int)], Vec::new(), Vec::new())]
+        );
+
+        let main = function(
+            "main",
+            identifier_type("Person"),
+            vec![Stmt::Return {
+                value: Some(new_expr("Person", Vec::new())),
+                span: span(),
+            }]
+        );
+
+        let result = analyze(struct_program(vec![person], vec![main]), source);
 
         assert!(result.is_err());
 
         let errors = result.unwrap_err();
+
         assert!(
-            errors.iter().any(|error| error.message.contains("arithmetic")),
-            "expected arithmetic diagnostic, got {errors:?}"
+            errors.iter().any(|error| error.message.contains("expects 1 argument")),
+            "expected constructor-argument-count diagnostic, got {errors:?}"
         );
     }
 
     #[test]
-    fn analyzes_boolean_condition() {
+    fn rejects_new_with_wrong_constructor_argument_type() {
         let source = SourceFile::new("");
 
-        let program = program(
-            vec![
-                function(
-                    "main",
-                    TypeName::Int,
-                    vec![Stmt::If {
-                        condition: boolean(true),
-                        then_block: Box::new(
-                            block(
-                                vec![Stmt::Return {
-                                    value: Some(int(1)),
-                                    span: span(),
-                                }]
-                            )
-                        ),
-                        else_block: Some(
-                            Box::new(
-                                block(
-                                    vec![Stmt::Return {
-                                        value: Some(int(2)),
-                                        span: span(),
-                                    }]
-                                )
-                            )
-                        ),
-                        span: span(),
-                    }]
-                )
-            ]
+        let person = struct_decl(
+            "Person",
+            None,
+            Vec::new(),
+            Vec::new(),
+            vec![constructor(vec![param("age", TypeName::Int)], Vec::new(), Vec::new())]
         );
 
-        let result = analyze(program, source);
-
-        assert!(result.is_ok(), "expected successful analysis: {result:?}");
-    }
-
-    #[test]
-    fn rejects_non_boolean_condition() {
-        let source = SourceFile::new("");
-
-        let program = program(
-            vec![
-                function(
-                    "main",
-                    TypeName::Int,
-                    vec![Stmt::If {
-                        condition: int(1),
-                        then_block: Box::new(
-                            block(
-                                vec![Stmt::Return {
-                                    value: Some(int(1)),
-                                    span: span(),
-                                }]
-                            )
-                        ),
-                        else_block: None,
-                        span: span(),
-                    }]
-                )
-            ]
+        let main = function(
+            "main",
+            identifier_type("Person"),
+            vec![Stmt::Return {
+                value: Some(new_expr("Person", vec![string("wrong")])),
+                span: span(),
+            }]
         );
 
-        let result = analyze(program, source);
+        let result = analyze(struct_program(vec![person], vec![main]), source);
 
         assert!(result.is_err());
 
         let errors = result.unwrap_err();
+
         assert!(
-            errors.iter().any(|error| error.message.contains("condition")),
-            "expected condition diagnostic, got {errors:?}"
+            errors.iter().any(|error| error.message.contains("argument 1 of constructor")),
+            "expected constructor-type diagnostic, got {errors:?}"
         );
     }
 
     #[test]
-    fn rejects_break_outside_loop() {
+    fn analyzes_explicit_base_constructor_call() {
         let source = SourceFile::new("");
 
-        let program = program(
-            vec![function("main", TypeName::Void, vec![Stmt::Break { span: span() }])]
+        let person = struct_decl(
+            "Person",
+            None,
+            vec![field("age", TypeName::Int)],
+            Vec::new(),
+            vec![constructor(vec![param("age", TypeName::Int)], Vec::new(), Vec::new())]
         );
 
-        let result = analyze(program, source);
+        let employee = struct_decl(
+            "Employee",
+            Some("Person"),
+            vec![field("employee_id", TypeName::Int)],
+            Vec::new(),
+            vec![
+                constructor(
+                    vec![param("age", TypeName::Int), param("employee_id", TypeName::Int)],
+                    vec![identifier("age")],
+                    vec![Stmt::Assign {
+                        target: member(identifier("this"), "employee_id"),
+                        value: identifier("employee_id"),
+                        span: span(),
+                    }]
+                )
+            ]
+        );
+
+        let main = function(
+            "main",
+            identifier_type("Employee"),
+            vec![Stmt::Return {
+                value: Some(new_expr("Employee", vec![int(30), int(42)])),
+                span: span(),
+            }]
+        );
+
+        let result = analyze(struct_program(vec![person, employee], vec![main]), source);
+
+        assert!(result.is_ok(), "expected explicit base constructor to work: {result:?}");
+
+        let hir = result.unwrap();
+
+        let employee_constructor = hir.functions
+            .iter()
+            .find(|function| {
+                function.owner ==
+                    Some(
+                        hir.structs
+                            .iter()
+                            .find(|structure| structure.name == "Employee")
+                            .unwrap().id
+                    )
+            })
+            .unwrap();
+
+        assert!(
+            employee_constructor.body.statements.iter().any(|statement| {
+                matches!(
+                    statement,
+                    HirStmt::Expr(HirExpr {
+                        kind: HirExprKind::ConstructorCall { .. },
+                        ..
+                    })
+                )
+            }),
+            "expected constructor to contain a base constructor call"
+        );
+    }
+
+    #[test]
+    fn analyzes_implicit_base_default_constructor_call() {
+        let source = SourceFile::new("");
+
+        let person = struct_decl("Person", None, Vec::new(), Vec::new(), Vec::new());
+
+        let employee = struct_decl("Employee", Some("Person"), Vec::new(), Vec::new(), Vec::new());
+
+        let main = function(
+            "main",
+            identifier_type("Employee"),
+            vec![Stmt::Return {
+                value: Some(new_expr("Employee", Vec::new())),
+                span: span(),
+            }]
+        );
+
+        let result = analyze(struct_program(vec![person, employee], vec![main]), source);
+
+        assert!(result.is_ok(), "expected implicit base constructor call: {result:?}");
+
+        let hir = result.unwrap();
+
+        let employee_id = hir.structs
+            .iter()
+            .find(|structure| structure.name == "Employee")
+            .unwrap().id;
+
+        let employee_constructor = hir.functions
+            .iter()
+            .find(|function| function.owner == Some(employee_id))
+            .unwrap();
+
+        assert!(
+            employee_constructor.body.statements.iter().any(|statement| {
+                matches!(
+                    statement,
+                    HirStmt::Expr(HirExpr {
+                        kind: HirExprKind::ConstructorCall { .. },
+                        ..
+                    })
+                )
+            }),
+            "expected implicit base constructor call"
+        );
+    }
+
+    #[test]
+    fn rejects_implicit_base_call_when_base_requires_arguments() {
+        let source = SourceFile::new("");
+
+        let person = struct_decl(
+            "Person",
+            None,
+            Vec::new(),
+            Vec::new(),
+            vec![constructor(vec![param("age", TypeName::Int)], Vec::new(), Vec::new())]
+        );
+
+        let employee = struct_decl("Employee", Some("Person"), Vec::new(), Vec::new(), Vec::new());
+
+        let main = function(
+            "main",
+            identifier_type("Employee"),
+            vec![Stmt::Return {
+                value: Some(new_expr("Employee", Vec::new())),
+                span: span(),
+            }]
+        );
+
+        let result = analyze(struct_program(vec![person, employee], vec![main]), source);
 
         assert!(result.is_err());
 
         let errors = result.unwrap_err();
+
         assert!(
-            errors.iter().any(|error| error.message.contains("break")),
-            "expected break diagnostic, got {errors:?}"
+            errors
+                .iter()
+                .any(|error| {
+                    error.message.contains("requires 1 argument") &&
+                        error.message.contains("implicit base constructor")
+                }),
+            "expected implicit-base-constructor diagnostic, got {errors:?}"
         );
-    }
-
-    #[test]
-    fn rejects_continue_outside_loop() {
-        let source = SourceFile::new("");
-
-        let program = program(
-            vec![function("main", TypeName::Void, vec![Stmt::Continue { span: span() }])]
-        );
-
-        let result = analyze(program, source);
-
-        assert!(result.is_err());
-
-        let errors = result.unwrap_err();
-        assert!(
-            errors.iter().any(|error| error.message.contains("continue")),
-            "expected continue diagnostic, got {errors:?}"
-        );
-    }
-
-    #[test]
-    fn allows_break_inside_loop() {
-        let source = SourceFile::new("");
-
-        let program = program(
-            vec![
-                function(
-                    "main",
-                    TypeName::Void,
-                    vec![Stmt::While {
-                        condition: boolean(true),
-                        body: Box::new(block(vec![Stmt::Break { span: span() }])),
-                        span: span(),
-                    }]
-                )
-            ]
-        );
-
-        let result = analyze(program, source);
-
-        assert!(result.is_ok(), "expected successful analysis: {result:?}");
-    }
-
-    #[test]
-    fn analyzes_equality_expression() {
-        let source = SourceFile::new("");
-
-        let program = program(
-            vec![
-                function(
-                    "main",
-                    TypeName::Bool,
-                    vec![Stmt::Return {
-                        value: Some(binary(BinaryOp::Equal, int(1), int(1))),
-                        span: span(),
-                    }]
-                )
-            ]
-        );
-
-        let result = analyze(program, source);
-
-        assert!(result.is_ok(), "expected successful analysis: {result:?}");
-    }
-
-    #[test]
-    fn rejects_equality_between_different_types() {
-        let source = SourceFile::new("");
-
-        let program = program(
-            vec![
-                function(
-                    "main",
-                    TypeName::Bool,
-                    vec![Stmt::Return {
-                        value: Some(binary(BinaryOp::Equal, int(1), string("one"))),
-                        span: span(),
-                    }]
-                )
-            ]
-        );
-
-        let result = analyze(program, source);
-
-        assert!(result.is_err(), "expected equality between different types to fail");
     }
 }

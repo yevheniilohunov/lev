@@ -1010,3 +1010,158 @@ fn generate_function(
         target
     ).generate()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::ir::{
+        BasicBlock,
+        IrFunction,
+        IrInstruction,
+        IrProgram,
+        IrStruct,
+        IrType,
+        Terminator,
+        ValueId,
+    };
+    use crate::semantic::symbols::{FunctionId, StructId};
+
+    fn function(instructions: Vec<IrInstruction>) -> IrFunction {
+        IrFunction {
+            id: Some(FunctionId(0)),
+            name: "main".to_string(),
+            owner: None,
+            parameters: Vec::new(),
+            locals: Vec::new(),
+            return_type: IrType::Int,
+            entry: BlockId(0),
+            blocks: vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    instructions,
+                    terminator: Terminator::Return {
+                        value: Some(ValueId(0)),
+                    },
+                },
+            ],
+        }
+    }
+
+    fn program(function: IrFunction) -> IrProgram {
+        IrProgram {
+            structs: Vec::new(),
+            functions: vec![function],
+        }
+    }
+
+    #[test]
+    fn generates_integer_constant() {
+        let function = function(vec![
+            IrInstruction::ConstInt {
+                destination: ValueId(0),
+                value: 42,
+            },
+        ]);
+
+        let assembly = generate(&program(function), CodegenTarget::X86_64)
+            .expect("codegen should succeed");
+
+        assert!(assembly.contains("mov rax, 42"));
+        assert!(assembly.contains("mov [rbp-8], rax"));
+        assert!(assembly.contains("leave"));
+        assert!(assembly.contains("ret"));
+    }
+
+    #[test]
+    fn generates_boolean_constants() {
+        let function = function(vec![
+            IrInstruction::ConstBool {
+                destination: ValueId(0),
+                value: true,
+            },
+        ]);
+
+        let assembly = generate(&program(function), CodegenTarget::X86_64)
+            .expect("codegen should succeed");
+
+        assert!(assembly.contains("mov rax, 1"));
+    }
+
+    #[test]
+    fn generates_addition() {
+        let function = function(vec![
+            IrInstruction::ConstInt {
+                destination: ValueId(0),
+                value: 10,
+            },
+            IrInstruction::ConstInt {
+                destination: ValueId(1),
+                value: 32,
+            },
+            IrInstruction::Binary {
+                destination: ValueId(2),
+                op: IrBinaryOp::Add,
+                left: ValueId(0),
+                right: ValueId(1),
+            },
+        ]);
+
+        let assembly = generate(&program(function), CodegenTarget::X86_64)
+            .expect("codegen should succeed");
+
+        assert!(assembly.contains("add rax, rcx"));
+    }
+
+    #[test]
+    fn generates_division() {
+        let function = function(vec![
+            IrInstruction::ConstInt {
+                destination: ValueId(0),
+                value: 20,
+            },
+            IrInstruction::ConstInt {
+                destination: ValueId(1),
+                value: 4,
+            },
+            IrInstruction::Binary {
+                destination: ValueId(2),
+                op: IrBinaryOp::Divide,
+                left: ValueId(0),
+                right: ValueId(1),
+            },
+        ]);
+
+        let assembly = generate(&program(function), CodegenTarget::X86_64)
+            .expect("codegen should succeed");
+
+        assert!(assembly.contains("cqo"));
+        assert!(assembly.contains("idiv rcx"));
+    }
+
+    #[test]
+    fn generates_equality() {
+        let function = function(vec![
+            IrInstruction::ConstInt {
+                destination: ValueId(0),
+                value: 10,
+            },
+            IrInstruction::ConstInt {
+                destination: ValueId(1),
+                value: 10,
+            },
+            IrInstruction::Binary {
+                destination: ValueId(2),
+                op: IrBinaryOp::Equal,
+                left: ValueId(0),
+                right: ValueId(1),
+            },
+        ]);
+
+        let assembly = generate(&program(function), CodegenTarget::X86_64)
+            .expect("codegen should succeed");
+
+        assert!(assembly.contains("cmp rax, rcx"));
+        assert!(assembly.contains("sete al"));
+        assert!(assembly.contains("movzx rax, al"));
+    }
+}

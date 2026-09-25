@@ -29,6 +29,12 @@ struct Validator<'a> {
     errors: Vec<CompilerError>,
 }
 
+#[derive(Debug, Clone)]
+struct ValueDefinition {
+    block: BlockId,
+    ty: IrType,
+}
+
 impl<'a> Validator<'a> {
     fn new(program: &'a IrProgram) -> Self {
         Self {
@@ -69,46 +75,56 @@ impl<'a> Validator<'a> {
         }
     }
 
-    fn instruction_type(&self, instruction: &IrInstruction) -> Option<IrType> {
+    fn instruction_type(
+        &self,
+        function: &IrFunction,
+        instruction: &IrInstruction,
+        definitions: &HashMap<ValueId, ValueDefinition>,
+    ) -> Option<IrType> {
         match instruction {
-            IrInstruction::Parameter { local, .. } => {
-                // Look up the parameter/local type.
-            }
+            IrInstruction::Parameter { local, .. } => function
+                .parameters
+                .iter()
+                .chain(function.locals.iter())
+                .find(|candidate| candidate.id == *local)
+                .map(|local| local.ty.clone()),
 
             IrInstruction::ConstInt { .. } => Some(IrType::Int),
+
             IrInstruction::ConstString { .. } => Some(IrType::String),
+
             IrInstruction::ConstBool { .. } => Some(IrType::Bool),
 
-            IrInstruction::LoadLocal { .. } => {
-                // local type
+            IrInstruction::LoadLocal { local, .. } => function
+                .parameters
+                .iter()
+                .chain(function.locals.iter())
+                .find(|candidate| candidate.id == *local)
+                .map(|local| local.ty.clone()),
+
+            IrInstruction::AllocStruct { struct_id, .. } => Some(IrType::Struct(*struct_id)),
+
+            IrInstruction::StructCopy { struct_id, .. } => Some(IrType::Struct(*struct_id)),
+
+            IrInstruction::LoadField { .. } => {
+                // Field typing is Phase 3.
+                None
             }
 
-            IrInstruction::StructCopy { struct_id, .. }
-            | IrInstruction::AllocStruct { struct_id, .. } => Some(IrType::Struct(*struct_id)),
-
-            IrInstruction::LoadField {
-                receiver: _,
-                field: _,
-                ..
-            } => {
-                // Look up receiver struct and field type.
+            IrInstruction::Binary { .. } => {
+                // Operation typing is Phase 2.
+                None
             }
 
-            IrInstruction::Binary { op, .. } => match op {
-                IrBinaryOp::Equal => Some(IrType::Bool),
-                IrBinaryOp::Add
-                | IrBinaryOp::Subtract
-                | IrBinaryOp::Multiply
-                | IrBinaryOp::Divide => Some(IrType::Int),
-            },
-
-            IrInstruction::Call { destination, .. } => {
-                // destination's type comes from called function
+            IrInstruction::Call { .. } => {
+                // Call-signature typing is Phase 3.
+                None
             }
 
-            IrInstruction::Phi { .. } => {
-                // infer from incoming values
-            }
+            IrInstruction::Phi { sources, .. } => sources
+                .first()
+                .and_then(|(_, value)| definitions.get(value))
+                .map(|definition| definition.ty.clone()),
 
             IrInstruction::StoreLocal { .. } | IrInstruction::StoreField { .. } => None,
         }
@@ -298,7 +314,7 @@ impl<'a> Validator<'a> {
     }
 
     fn validate_values(&mut self, function: &IrFunction, dominance: &DominanceInfo) {
-        let mut definitions = HashMap::<ValueId, BlockId>::new();
+        let mut definitions = HashMap::<ValueId, ValueDefinition>::new();
 
         for block in &function.blocks {
             if !dominance.reachable.contains(&block.id) {
@@ -306,13 +322,27 @@ impl<'a> Validator<'a> {
             }
 
             for instruction in &block.instructions {
-                if let Some(destination) = instruction_destination(instruction)
-                    && definitions.insert(destination, block.id).is_some()
-                {
-                    self.error(format!(
-                        "function '{}': value %{} is defined more than once",
-                        function.name, destination.0
-                    ));
+                if let Some(destination) = instruction_destination(instruction) {
+                    let Some(ty) = self.instruction_type(function, instruction, &definitions)
+                    else {
+                        continue;
+                    };
+
+                    if definitions
+                        .insert(
+                            destination,
+                            ValueDefinition {
+                                block: block.id,
+                                ty,
+                            },
+                        )
+                        .is_some()
+                    {
+                        self.error(format!(
+                            "function '{}': value %{} is defined more than once",
+                            function.name, destination.0
+                        ));
+                    }
                 }
             }
         }
@@ -347,7 +377,7 @@ impl<'a> Validator<'a> {
         function: &IrFunction,
         use_block: BlockId,
         instruction: &IrInstruction,
-        definitions: &HashMap<ValueId, BlockId>,
+        definitions: &HashMap<ValueId, ValueDefinition>,
         dominance: &DominanceInfo,
     ) {
         match instruction {
@@ -398,7 +428,7 @@ impl<'a> Validator<'a> {
         function: &IrFunction,
         phi_block: BlockId,
         sources: &[(BlockId, ValueId)],
-        definitions: &HashMap<ValueId, BlockId>,
+        definitions: &HashMap<ValueId, ValueDefinition>,
         dominance: &DominanceInfo,
     ) {
         let predecessors = function.predecessors(phi_block);
@@ -424,36 +454,26 @@ impl<'a> Validator<'a> {
                 ));
             }
 
-            let Some(&definition_block) = definitions.get(value) else {
-                self.error(
-                    format!(
-                        "function '{}': phi in block {} uses value %{} from predecessor {} but that value is never defined",
-                        function.name,
-                        phi_block.0,
-                        value.0,
-                        predecessor.0
-                    )
-                );
+            let Some(definition) = definitions.get(value) else {
+                self.error(format!(
+        "function '{}': phi in block {} uses value %{} from predecessor {} but that value is never defined",
+        function.name,
+        phi_block.0,
+        value.0,
+        predecessor.0
+    ));
                 continue;
             };
 
-            // A phi incoming value is used along the edge:
-            //
-            //     predecessor -> phi_block
-            //
-            // Therefore the definition must dominate the predecessor,
-            // not necessarily the phi block itself.
-            if !dominance.dominates(definition_block, *predecessor) {
-                self.error(
-                    format!(
-                        "function '{}': value %{} is defined in block {} but does not dominate predecessor block {} for phi in block {}",
-                        function.name,
-                        value.0,
-                        definition_block.0,
-                        predecessor.0,
-                        phi_block.0
-                    )
-                );
+            if !dominance.dominates(definition.block, *predecessor) {
+                self.error(format!(
+        "function '{}': value %{} is defined in block {} but does not dominate predecessor block {} for phi in block {}",
+        function.name,
+        value.0,
+        definition.block.0,
+        predecessor.0,
+        phi_block.0
+    ));
             }
         }
 
@@ -476,7 +496,7 @@ impl<'a> Validator<'a> {
         function: &IrFunction,
         use_block: BlockId,
         terminator: &Terminator,
-        definitions: &HashMap<ValueId, BlockId>,
+        definitions: &HashMap<ValueId, ValueDefinition>,
         dominance: &DominanceInfo,
     ) {
         match terminator {
@@ -501,10 +521,10 @@ impl<'a> Validator<'a> {
         function: &IrFunction,
         use_block: BlockId,
         value: ValueId,
-        definitions: &HashMap<ValueId, BlockId>,
+        definitions: &HashMap<ValueId, ValueDefinition>,
         dominance: &DominanceInfo,
     ) {
-        let Some(&definition_block) = definitions.get(&value) else {
+        let Some(definition) = definitions.get(&value) else {
             self.error(format!(
                 "function '{}': value %{} is used but never defined",
                 function.name, value.0
@@ -512,16 +532,14 @@ impl<'a> Validator<'a> {
             return;
         };
 
-        if !dominance.dominates(definition_block, use_block) {
-            self.error(
-                format!(
-                    "function '{}': value %{} is defined in block {} but used in block {} where the definition does not dominate the use",
-                    function.name,
-                    value.0,
-                    definition_block.0,
-                    use_block.0
-                )
-            );
+        if !dominance.dominates(definition.block, use_block) {
+            self.error(format!(
+        "function '{}': value %{} is defined in block {} but used in block {} where the definition does not dominate the use",
+        function.name,
+        value.0,
+        definition.block.0,
+        use_block.0
+    ));
         }
     }
 

@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::{compiler::error::CompilerError, semantic::symbols::FunctionId};
+use crate::{
+    compiler::error::CompilerError,
+    semantic::symbols::{FunctionId, LocalId, StructId},
+};
 
 use super::ir::*;
 
@@ -51,6 +54,33 @@ impl<'a> Validator<'a> {
         }
     }
 
+    fn is_assignable(&self, actual: &IrType, expected: &IrType) -> bool {
+        if actual == expected {
+            return true;
+        }
+
+        let (IrType::Struct(actual_id), IrType::Struct(expected_id)) = (actual, expected) else {
+            return false;
+        };
+
+        let mut current = Some(*actual_id);
+
+        while let Some(struct_id) = current {
+            if struct_id == *expected_id {
+                return true;
+            }
+
+            current = self
+                .program
+                .structs
+                .iter()
+                .find(|structure| structure.id == struct_id)
+                .and_then(|structure| structure.base);
+        }
+
+        false
+    }
+
     fn validate_ssa_form(&mut self, function: &IrFunction) {
         for block in &function.blocks {
             for instruction in &block.instructions {
@@ -75,58 +105,374 @@ impl<'a> Validator<'a> {
         }
     }
 
-    fn instruction_type(
+    fn pe(
         &self,
         function: &IrFunction,
         instruction: &IrInstruction,
         definitions: &HashMap<ValueId, ValueDefinition>,
     ) -> Option<IrType> {
         match instruction {
-            IrInstruction::Parameter { local, .. } => function
-                .parameters
-                .iter()
-                .chain(function.locals.iter())
-                .find(|candidate| candidate.id == *local)
-                .map(|local| local.ty.clone()),
+            IrInstruction::Parameter { local, .. } | IrInstruction::LoadLocal { local, .. } => {
+                self.local_type(function, *local)
+            }
 
             IrInstruction::ConstInt { .. } => Some(IrType::Int),
-
             IrInstruction::ConstString { .. } => Some(IrType::String),
-
             IrInstruction::ConstBool { .. } => Some(IrType::Bool),
 
-            IrInstruction::LoadLocal { local, .. } => function
-                .parameters
+            IrInstruction::AllocStruct { struct_id, .. }
+            | IrInstruction::StructCopy { struct_id, .. } => Some(IrType::Struct(*struct_id)),
+
+            IrInstruction::LoadField {
+                receiver, field, ..
+            } => {
+                let IrType::Struct(struct_id) = self.value_type(*receiver, definitions)? else {
+                    return None;
+                };
+
+                self.struct_field_type(struct_id, *field)
+            }
+
+            IrInstruction::Binary {
+                op, left, right, ..
+            } => {
+                let left_ty = self.value_type(*left, definitions)?;
+                let right_ty = self.value_type(*right, definitions)?;
+
+                match op {
+                    IrBinaryOp::Add
+                    | IrBinaryOp::Subtract
+                    | IrBinaryOp::Multiply
+                    | IrBinaryOp::Divide => {
+                        if left_ty == IrType::Int && right_ty == IrType::Int {
+                            Some(IrType::Int)
+                        } else {
+                            None
+                        }
+                    }
+
+                    IrBinaryOp::Equal => {
+                        if left_ty == right_ty {
+                            Some(IrType::Bool)
+                        } else {
+                            None
+                        }
+                    }
+                }
+            }
+
+            IrInstruction::Call {
+                function: target, ..
+            } => self
+                .program
+                .functions
                 .iter()
-                .chain(function.locals.iter())
-                .find(|candidate| candidate.id == *local)
-                .map(|local| local.ty.clone()),
+                .find(|candidate| candidate.id == Some(*target))
+                .map(|candidate| candidate.return_type.clone()),
 
-            IrInstruction::AllocStruct { struct_id, .. } => Some(IrType::Struct(*struct_id)),
+            IrInstruction::Phi { sources, .. } => {
+                let mut ty = None;
 
-            IrInstruction::StructCopy { struct_id, .. } => Some(IrType::Struct(*struct_id)),
+                for (_, value) in sources {
+                    let source_ty = self.value_type(*value, definitions)?;
 
-            IrInstruction::LoadField { .. } => {
-                // Field typing is Phase 3.
-                None
+                    if let Some(existing) = &ty {
+                        if *existing != source_ty {
+                            return None;
+                        }
+                    } else {
+                        ty = Some(source_ty);
+                    }
+                }
+
+                ty
             }
-
-            IrInstruction::Binary { .. } => {
-                // Operation typing is Phase 2.
-                None
-            }
-
-            IrInstruction::Call { .. } => {
-                // Call-signature typing is Phase 3.
-                None
-            }
-
-            IrInstruction::Phi { sources, .. } => sources
-                .first()
-                .and_then(|(_, value)| definitions.get(value))
-                .map(|definition| definition.ty.clone()),
 
             IrInstruction::StoreLocal { .. } | IrInstruction::StoreField { .. } => None,
+        }
+    }
+
+    fn local_type(&self, function: &IrFunction, local: LocalId) -> Option<IrType> {
+        function
+            .parameters
+            .iter()
+            .chain(function.locals.iter())
+            .find(|candidate| candidate.id == local)
+            .map(|local| local.ty.clone())
+    }
+
+    fn value_type(
+        &self,
+        value: ValueId,
+        definitions: &HashMap<ValueId, ValueDefinition>,
+    ) -> Option<IrType> {
+        definitions
+            .get(&value)
+            .map(|definition| definition.ty.clone())
+    }
+
+    fn struct_field_type(&self, struct_id: StructId, field: usize) -> Option<IrType> {
+        self.program
+            .structs
+            .iter()
+            .find(|structure| structure.id == struct_id)
+            .and_then(|structure| structure.fields.get(field))
+            .map(|field| field.ty.clone())
+    }
+
+    fn validate_instruction_uses(
+        &mut self,
+        function: &IrFunction,
+        use_block: BlockId,
+        instruction: &IrInstruction,
+        definitions: &HashMap<ValueId, ValueDefinition>,
+        dominance: &DominanceInfo,
+    ) {
+        match instruction {
+            IrInstruction::ConstInt { .. }
+            | IrInstruction::ConstString { .. }
+            | IrInstruction::ConstBool { .. }
+            | IrInstruction::LoadLocal { .. }
+            | IrInstruction::Parameter { .. }
+            | IrInstruction::AllocStruct { .. } => {}
+
+            IrInstruction::StoreLocal { local, value } => {
+                self.require_value(function, use_block, *value, definitions, dominance);
+
+                if let Some(value_ty) = self.value_type(*value, definitions) {
+                    if let Some(local_ty) = self.local_type(function, *local) {
+                        self.require_type(
+                            function,
+                            format!("store to local {}", local.0),
+                            &value_ty,
+                            &local_ty,
+                        );
+                    }
+                }
+            }
+
+            IrInstruction::Binary {
+                op, left, right, ..
+            } => {
+                self.require_value(function, use_block, *left, definitions, dominance);
+                self.require_value(function, use_block, *right, definitions, dominance);
+
+                let left_ty = self.value_type(*left, definitions);
+                let right_ty = self.value_type(*right, definitions);
+
+                match op {
+                    IrBinaryOp::Add
+                    | IrBinaryOp::Subtract
+                    | IrBinaryOp::Multiply
+                    | IrBinaryOp::Divide => {
+                        if let Some(ty) = left_ty {
+                            self.require_type(function, "binary left operand", &ty, &IrType::Int);
+                        }
+
+                        if let Some(ty) = right_ty {
+                            self.require_type(function, "binary right operand", &ty, &IrType::Int);
+                        }
+                    }
+
+                    IrBinaryOp::Equal => {
+                        if let (Some(left_ty), Some(right_ty)) = (left_ty, right_ty) {
+                            if left_ty != right_ty {
+                                self.error(format!(
+                                "function '{}': equality operands have incompatible types: {:?} and {:?}",
+                                function.name, left_ty, right_ty
+                            ));
+                            }
+                        }
+                    }
+                }
+            }
+
+            IrInstruction::Call {
+                function: target,
+                arguments,
+                destination,
+            } => {
+                for argument in arguments {
+                    self.require_value(function, use_block, *argument, definitions, dominance);
+                }
+
+                let Some(target_function) = self
+                    .program
+                    .functions
+                    .iter()
+                    .find(|candidate| candidate.id == Some(*target))
+                else {
+                    return;
+                };
+
+                if arguments.len() != target_function.parameters.len() {
+                    self.error(format!(
+                        "function '{}': call to '{}' expects {} arguments but got {}",
+                        function.name,
+                        target_function.name,
+                        target_function.parameters.len(),
+                        arguments.len()
+                    ));
+                }
+
+                for (index, (argument, parameter)) in arguments
+                    .iter()
+                    .zip(&target_function.parameters)
+                    .enumerate()
+                {
+                    let Some(argument_ty) = self.value_type(*argument, definitions) else {
+                        continue;
+                    };
+
+                    if !self.is_assignable(&argument_ty, &parameter.ty) {
+                        self.error(format!(
+                            "function '{}': argument {} to '{}' has type {:?}, expected {:?}",
+                            function.name, index, target_function.name, argument_ty, parameter.ty
+                        ));
+                    }
+                }
+
+                if let Some(destination) = destination {
+                    if target_function.return_type == IrType::Void {
+                        self.error(format!(
+                            "function '{}': call to void function '{}' has a destination",
+                            function.name, target_function.name
+                        ));
+                    } else if let Some(destination_ty) = self.value_type(*destination, definitions)
+                    {
+                        if destination_ty != target_function.return_type {
+                            self.error(format!(
+                                "function '{}': call destination %{} has type {:?}, expected {:?}",
+                                function.name,
+                                destination.0,
+                                destination_ty,
+                                target_function.return_type
+                            ));
+                        }
+                    }
+                }
+            }
+
+            IrInstruction::Phi { sources, .. } => {
+                self.validate_phi_sources(function, use_block, sources, definitions, dominance);
+
+                let mut phi_type = None;
+
+                for (_, value) in sources {
+                    let Some(value_ty) = self.value_type(*value, definitions) else {
+                        continue;
+                    };
+
+                    if let Some(existing) = &phi_type {
+                        if existing != &value_ty {
+                            self.error(format!(
+                            "function '{}': phi in block {} has incompatible value types {:?} and {:?}",
+                            function.name,
+                            use_block.0,
+                            existing,
+                            value_ty
+                        ));
+                        }
+                    } else {
+                        phi_type = Some(value_ty);
+                    }
+                }
+            }
+
+            IrInstruction::LoadField {
+                receiver,
+                field,
+                destination,
+            } => {
+                self.require_value(function, use_block, *receiver, definitions, dominance);
+
+                let Some(receiver_ty) = self.value_type(*receiver, definitions) else {
+                    return;
+                };
+
+                let IrType::Struct(struct_id) = receiver_ty else {
+                    self.error(format!(
+                        "function '{}': LoadField receiver %{} is not a struct",
+                        function.name, receiver.0
+                    ));
+                    return;
+                };
+
+                let Some(field_ty) = self.struct_field_type(struct_id, *field) else {
+                    self.error(format!(
+                        "function '{}': LoadField references invalid field {} of struct {:?}",
+                        function.name, field, struct_id
+                    ));
+                    return;
+                };
+
+                let Some(destination_ty) = self.value_type(*destination, definitions) else {
+                    return;
+                };
+
+                if destination_ty != field_ty {
+                    self.error(format!(
+                        "function '{}': LoadField destination %{} has type {:?}, expected {:?}",
+                        function.name, destination.0, destination_ty, field_ty
+                    ));
+                }
+            }
+
+            IrInstruction::StoreField {
+                receiver,
+                field,
+                value,
+            } => {
+                self.require_value(function, use_block, *receiver, definitions, dominance);
+
+                self.require_value(function, use_block, *value, definitions, dominance);
+
+                let Some(receiver_ty) = self.value_type(*receiver, definitions) else {
+                    return;
+                };
+
+                let IrType::Struct(struct_id) = receiver_ty else {
+                    self.error(format!(
+                        "function '{}': StoreField receiver %{} is not a struct",
+                        function.name, receiver.0
+                    ));
+                    return;
+                };
+
+                let Some(field_ty) = self.struct_field_type(struct_id, *field) else {
+                    self.error(format!(
+                        "function '{}': StoreField references invalid field {} of struct {:?}",
+                        function.name, field, struct_id
+                    ));
+                    return;
+                };
+
+                if let Some(value_ty) = self.value_type(*value, definitions) {
+                    if !self.is_assignable(&value_ty, &field_ty) {
+                        self.error(format!(
+                            "function '{}': StoreField value has type {:?}, expected {:?}",
+                            function.name, value_ty, field_ty
+                        ));
+                    }
+                }
+            }
+
+            IrInstruction::StructCopy {
+                source, struct_id, ..
+            } => {
+                self.require_value(function, use_block, *source, definitions, dominance);
+
+                if let Some(source_ty) = self.value_type(*source, definitions) {
+                    let expected = IrType::Struct(*struct_id);
+
+                    if source_ty != expected {
+                        self.error(format!(
+                            "function '{}': StructCopy source has type {:?}, expected {:?}",
+                            function.name, source_ty, expected
+                        ));
+                    }
+                }
+            }
         }
     }
 
@@ -145,7 +491,6 @@ impl<'a> Validator<'a> {
         self.validate_blocks(function);
         self.validate_locals(function);
         self.validate_calls(function);
-        self.validate_returns(function);
 
         if require_ssa {
             self.validate_ssa_form(function);
@@ -285,7 +630,11 @@ impl<'a> Validator<'a> {
         }
     }
 
-    fn validate_returns(&mut self, function: &IrFunction) {
+    fn validate_returns(
+        &mut self,
+        function: &IrFunction,
+        definitions: &HashMap<ValueId, ValueDefinition>,
+    ) {
         for block in &function.blocks {
             let Terminator::Return { value } = &block.terminator else {
                 continue;
@@ -308,7 +657,19 @@ impl<'a> Validator<'a> {
                     ));
                 }
 
-                (_, Some(_)) => {}
+                (expected, Some(value)) => {
+                    let Some(actual) = definitions.get(value).map(|definition| &definition.ty)
+                    else {
+                        continue;
+                    };
+
+                    if actual != expected {
+                        self.error(format!(
+                            "function '{}': return value has type {:?}, expected {:?}",
+                            function.name, actual, expected
+                        ));
+                    }
+                }
             }
         }
     }
@@ -323,8 +684,7 @@ impl<'a> Validator<'a> {
 
             for instruction in &block.instructions {
                 if let Some(destination) = instruction_destination(instruction) {
-                    let Some(ty) = self.instruction_type(function, instruction, &definitions)
-                    else {
+                    let Some(ty) = self.pe(function, instruction, &definitions) else {
                         continue;
                     };
 
@@ -370,57 +730,8 @@ impl<'a> Validator<'a> {
                 dominance,
             );
         }
-    }
 
-    fn validate_instruction_uses(
-        &mut self,
-        function: &IrFunction,
-        use_block: BlockId,
-        instruction: &IrInstruction,
-        definitions: &HashMap<ValueId, ValueDefinition>,
-        dominance: &DominanceInfo,
-    ) {
-        match instruction {
-            IrInstruction::ConstInt { .. }
-            | IrInstruction::ConstString { .. }
-            | IrInstruction::ConstBool { .. }
-            | IrInstruction::LoadLocal { .. }
-            | IrInstruction::Parameter { .. } => {}
-
-            IrInstruction::StoreLocal { value, .. } => {
-                self.require_value(function, use_block, *value, definitions, dominance);
-            }
-
-            IrInstruction::Binary { left, right, .. } => {
-                self.require_value(function, use_block, *left, definitions, dominance);
-
-                self.require_value(function, use_block, *right, definitions, dominance);
-            }
-
-            IrInstruction::Call { arguments, .. } => {
-                for argument in arguments {
-                    self.require_value(function, use_block, *argument, definitions, dominance);
-                }
-            }
-
-            IrInstruction::Phi { sources, .. } => {
-                self.validate_phi_sources(function, use_block, sources, definitions, dominance);
-            }
-            IrInstruction::LoadField { receiver, .. } => {
-                self.require_value(function, use_block, *receiver, definitions, dominance);
-            }
-            IrInstruction::StoreField {
-                receiver, value, ..
-            } => {
-                self.require_value(function, use_block, *receiver, definitions, dominance);
-
-                self.require_value(function, use_block, *value, definitions, dominance);
-            }
-            IrInstruction::AllocStruct { .. } => {}
-            IrInstruction::StructCopy { source, .. } => {
-                self.require_value(function, use_block, *source, definitions, dominance);
-            }
-        }
+        self.validate_returns(function, &definitions);
     }
 
     fn validate_phi_sources(
@@ -540,6 +851,24 @@ impl<'a> Validator<'a> {
         definition.block.0,
         use_block.0
     ));
+        }
+    }
+
+    fn require_type(
+        &mut self,
+        function: &IrFunction,
+        context: impl Into<String>,
+        actual: &IrType,
+        expected: &IrType,
+    ) {
+        if actual != expected {
+            self.error(format!(
+                "function '{}': {} has type {:?}, expected {:?}",
+                function.name,
+                context.into(),
+                actual,
+                expected
+            ));
         }
     }
 

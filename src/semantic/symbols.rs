@@ -79,7 +79,12 @@ impl SymbolTable {
         }
         let id = StructId(self.struct_count());
         self.struct_names.insert(name.clone(), id);
-        self.structs.push(StructSymbol { id, name, base: None, fields: Vec::new() });
+        self.structs.push(StructSymbol {
+            id,
+            name,
+            base: None,
+            fields: Vec::new(),
+        });
 
         Ok(id)
     }
@@ -87,12 +92,19 @@ impl SymbolTable {
     pub fn add_constructor(
         &mut self,
         owner: StructId,
-        parameters: Vec<ParameterSymbol>
+        parameters: Vec<ParameterSymbol>,
     ) -> Result<ConstructorId, String> {
-        if self.constructors.iter().any(|constructor| constructor.owner == owner) {
+        if self
+            .constructors
+            .iter()
+            .any(|constructor| constructor.owner == owner)
+        {
             let struct_name = self.struct_symbol(owner).name.clone();
 
-            return Err(format!("struct '{}' already has a constructor", struct_name));
+            return Err(format!(
+                "struct '{}' already has a constructor",
+                struct_name
+            ));
         }
 
         let id = ConstructorId(self.constructors.len());
@@ -131,11 +143,11 @@ impl SymbolTable {
         while let Some(id) = current {
             let structure = &self.structs[id.0];
 
-            if
-                let Some((index, field)) = structure.fields
-                    .iter()
-                    .enumerate()
-                    .find(|(_, field)| field.name == name)
+            if let Some((index, field)) = structure
+                .fields
+                .iter()
+                .enumerate()
+                .find(|(_, field)| field.name == name)
             {
                 return Some((index, field));
             }
@@ -158,7 +170,7 @@ impl SymbolTable {
         &mut self,
         name: String,
         parameters: Vec<ParameterSymbol>,
-        return_type: Type
+        return_type: Type,
     ) -> Result<FunctionId, String> {
         if self.function_names.contains_key(&name) {
             return Err(format!("function '{}' is already declared", name));
@@ -167,7 +179,13 @@ impl SymbolTable {
         let id = FunctionId(self.functions.len());
 
         self.function_names.insert(name.clone(), id);
-        self.functions.push(FunctionSymbol { id, name, owner: None, parameters, return_type });
+        self.functions.push(FunctionSymbol {
+            id,
+            name,
+            owner: None,
+            parameters,
+            return_type,
+        });
         Ok(id)
     }
 
@@ -176,13 +194,16 @@ impl SymbolTable {
         owner: StructId,
         name: String,
         parameters: Vec<ParameterSymbol>,
-        return_type: Type
+        return_type: Type,
     ) -> Result<FunctionId, String> {
         let key = (owner, name.clone());
 
         if self.method_names.contains_key(&key) {
             let struct_name = self.struct_symbol(owner).name.clone();
-            return Err(format!("method '{}.{}' is already declared", struct_name, name));
+            return Err(format!(
+                "method '{}.{}' is already declared",
+                struct_name, name
+            ));
         }
 
         let id = FunctionId(self.functions.len());

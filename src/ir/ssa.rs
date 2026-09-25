@@ -1,8 +1,8 @@
-use std::collections::{ BTreeMap, BTreeSet, HashMap };
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::compiler::error::CompilerError;
 
-use super::ir::{ BlockId, IrFunction, IrInstruction, IrProgram, Terminator, ValueId };
+use super::ir::{BlockId, IrFunction, IrInstruction, IrProgram, Terminator, ValueId};
 use super::validate::DominanceInfo;
 
 pub fn construct_ssa(program: &mut IrProgram) -> Result<(), Vec<CompilerError>> {
@@ -50,7 +50,7 @@ fn construct_function_ssa(function: &mut IrFunction) -> Result<(), Vec<CompilerE
         &dominator_tree,
         &mut stacks,
         &mut aliases,
-        &mut allocator
+        &mut allocator,
     )?;
 
     sort_phi_sources(function);
@@ -82,11 +82,17 @@ fn insert_phi_nodes(function: &mut IrFunction, dominance: &DominanceInfo) {
         for instruction in &block.instructions {
             match instruction {
                 IrInstruction::Parameter { local, .. } => {
-                    definition_blocks.entry(*local).or_default().insert(block.id);
+                    definition_blocks
+                        .entry(*local)
+                        .or_default()
+                        .insert(block.id);
                 }
 
                 IrInstruction::StoreLocal { local, .. } => {
-                    definition_blocks.entry(*local).or_default().insert(block.id);
+                    definition_blocks
+                        .entry(*local)
+                        .or_default()
+                        .insert(block.id);
                 }
 
                 _ => {}
@@ -120,8 +126,10 @@ fn insert_phi_nodes(function: &mut IrFunction, dominance: &DominanceInfo) {
                     continue;
                 }
 
-                let block = match
-                    function.blocks.iter_mut().find(|block| block.id == frontier_block)
+                let block = match function
+                    .blocks
+                    .iter_mut()
+                    .find(|block| block.id == frontier_block)
                 {
                     Some(block) => block,
                     None => {
@@ -129,11 +137,14 @@ fn insert_phi_nodes(function: &mut IrFunction, dominance: &DominanceInfo) {
                     }
                 };
 
-                block.instructions.insert(0, IrInstruction::Phi {
-                    destination: ValueId(usize::MAX),
-                    local,
-                    sources: Vec::new(),
-                });
+                block.instructions.insert(
+                    0,
+                    IrInstruction::Phi {
+                        destination: ValueId(usize::MAX),
+                        local,
+                        sources: Vec::new(),
+                    },
+                );
 
                 if !definitions.contains(&frontier_block) {
                     worklist.push(frontier_block);
@@ -155,11 +166,9 @@ fn insert_phi_nodes(function: &mut IrFunction, dominance: &DominanceInfo) {
             }
         }
 
-        phis.sort_by_key(|instruction| {
-            match instruction {
-                IrInstruction::Phi { local, .. } => local.0,
-                _ => usize::MAX,
-            }
+        phis.sort_by_key(|instruction| match instruction {
+            IrInstruction::Phi { local, .. } => local.0,
+            _ => usize::MAX,
         });
 
         phis.extend(rest);
@@ -173,7 +182,7 @@ fn insert_phi_nodes(function: &mut IrFunction, dominance: &DominanceInfo) {
 
 fn build_dominator_tree(
     dominance: &DominanceInfo,
-    entry: BlockId
+    entry: BlockId,
 ) -> BTreeMap<BlockId, Vec<BlockId>> {
     let mut tree: BTreeMap<BlockId, Vec<BlockId>> = BTreeMap::new();
 
@@ -214,7 +223,7 @@ fn rename_block(
     dominator_tree: &BTreeMap<BlockId, Vec<BlockId>>,
     stacks: &mut HashMap<crate::semantic::symbols::LocalId, Vec<ValueId>>,
     aliases: &mut HashMap<ValueId, ValueId>,
-    allocator: &mut ValueAllocator
+    allocator: &mut ValueAllocator,
 ) -> Result<(), Vec<CompilerError>> {
     if !function.reachable_blocks().contains(&block_id) {
         return Ok(());
@@ -230,11 +239,10 @@ fn rename_block(
         let block = match function.blocks.iter_mut().find(|b| b.id == block_id) {
             Some(block) => block,
             None => {
-                return Err(
-                    vec![
-                        CompilerError::internal(format!("SSA: block {:?} does not exist", block_id))
-                    ]
-                );
+                return Err(vec![CompilerError::internal(format!(
+                    "SSA: block {:?} does not exist",
+                    block_id
+                ))]);
             }
         };
 
@@ -259,13 +267,18 @@ fn rename_block(
     let mut new_instructions = Vec::new();
 
     /*
-     * First define all Phi values.
+    * First define all Phi values.
 
-     * This is important because a LoadLocal later in the same block must
-     * see the Phi value.
-     */
+    * This is important because a LoadLocal later in the same block must
+    * see the Phi value.
+    */
     for instruction in phi_instructions {
-        let IrInstruction::Phi { destination: _, local, sources } = instruction else {
+        let IrInstruction::Phi {
+            destination: _,
+            local,
+            sources,
+        } = instruction
+        else {
             unreachable!();
         };
 
@@ -293,67 +306,54 @@ fn rename_block(
                 stacks.entry(local).or_default().push(destination);
                 pushed_locals.push(local);
 
-                new_instructions.push(IrInstruction::Parameter {
-                    destination,
-                    local,
-                });
+                new_instructions.push(IrInstruction::Parameter { destination, local });
             }
 
             /*
              * Constants are already SSA values.
              */
             IrInstruction::ConstInt { destination, value } => {
-                new_instructions.push(IrInstruction::ConstInt {
-                    destination,
-                    value,
-                });
+                new_instructions.push(IrInstruction::ConstInt { destination, value });
             }
 
             IrInstruction::ConstString { destination, value } => {
-                new_instructions.push(IrInstruction::ConstString {
-                    destination,
-                    value,
-                });
+                new_instructions.push(IrInstruction::ConstString { destination, value });
             }
 
             IrInstruction::ConstBool { destination, value } => {
-                new_instructions.push(IrInstruction::ConstBool {
-                    destination,
-                    value,
-                });
+                new_instructions.push(IrInstruction::ConstBool { destination, value });
             }
 
             /*
-             * LoadLocal disappears completely.
+            * LoadLocal disappears completely.
 
-             * Example:
-             *
-             *   %4 = LoadLocal x
-             *   %5 = Add %4, %2
-             *
-             * becomes:
-             *
-             *   %5 = Add %ssa_x, %2
-             *
-             * The old %4 is recorded as an alias.
-             */
+            * Example:
+            *
+            *   %4 = LoadLocal x
+            *   %5 = Add %4, %2
+            *
+            * becomes:
+            *
+            *   %5 = Add %ssa_x, %2
+            *
+            * The old %4 is recorded as an alias.
+            */
             IrInstruction::LoadLocal { destination, local } => {
                 let current = current_value(stacks, local).ok_or_else(|| {
-                    vec![
-                        CompilerError::internal(
-                            format!("SSA: local {:?} has no current definition", local)
-                        )
-                    ]
+                    vec![CompilerError::internal(format!(
+                        "SSA: local {:?} has no current definition",
+                        local
+                    ))]
                 })?;
 
                 aliases.insert(destination, current);
             }
 
             /*
-             * StoreLocal also disappears.
+            * StoreLocal also disappears.
 
-             * The stored SSA value becomes the current version of the local.
-             */
+            * The stored SSA value becomes the current version of the local.
+            */
             IrInstruction::StoreLocal { local, value } => {
                 let value = resolve_alias(aliases, value);
 
@@ -361,7 +361,12 @@ fn rename_block(
                 pushed_locals.push(local);
             }
 
-            IrInstruction::Binary { destination, op, left, right } => {
+            IrInstruction::Binary {
+                destination,
+                op,
+                left,
+                right,
+            } => {
                 let left = resolve_alias(aliases, left);
                 let right = resolve_alias(aliases, right);
 
@@ -373,7 +378,11 @@ fn rename_block(
                 });
             }
 
-            IrInstruction::Call { destination, function: called_function, arguments } => {
+            IrInstruction::Call {
+                destination,
+                function: called_function,
+                arguments,
+            } => {
                 let arguments = arguments
                     .into_iter()
                     .map(|value| resolve_alias(aliases, value))
@@ -392,14 +401,21 @@ fn rename_block(
             IrInstruction::Phi { .. } => {
                 unreachable!("Phi instructions were separated above");
             }
-            IrInstruction::AllocStruct { destination, struct_id } => {
+            IrInstruction::AllocStruct {
+                destination,
+                struct_id,
+            } => {
                 new_instructions.push(IrInstruction::AllocStruct {
                     destination,
                     struct_id,
                 });
             }
 
-            IrInstruction::StoreField { receiver, field, value } => {
+            IrInstruction::StoreField {
+                receiver,
+                field,
+                value,
+            } => {
                 let receiver = resolve_alias(aliases, receiver);
                 let value = resolve_alias(aliases, value);
 
@@ -410,7 +426,11 @@ fn rename_block(
                 });
             }
 
-            IrInstruction::LoadField { destination, receiver, field } => {
+            IrInstruction::LoadField {
+                destination,
+                receiver,
+                field,
+            } => {
                 let receiver = resolve_alias(aliases, receiver);
 
                 new_instructions.push(IrInstruction::LoadField {
@@ -419,7 +439,11 @@ fn rename_block(
                     field,
                 });
             }
-            IrInstruction::StructCopy { destination, source, struct_id } => {
+            IrInstruction::StructCopy {
+                destination,
+                source,
+                struct_id,
+            } => {
                 let source = resolve_alias(aliases, source);
 
                 new_instructions.push(IrInstruction::StructCopy {
@@ -435,7 +459,8 @@ fn rename_block(
      * Rewrite the block terminator.
      */
     let terminator = {
-        let block = function.blocks
+        let block = function
+            .blocks
             .iter()
             .find(|block| block.id == block_id)
             .expect("block disappeared during SSA construction");
@@ -447,7 +472,8 @@ fn rename_block(
      * Put the rewritten instructions and terminator back.
      */
     {
-        let block = function.blocks
+        let block = function
+            .blocks
             .iter_mut()
             .find(|block| block.id == block_id)
             .expect("block disappeared during SSA construction");
@@ -457,64 +483,64 @@ fn rename_block(
     }
 
     /*
-     * Every successor Phi gets an incoming value from this block.
+    * Every successor Phi gets an incoming value from this block.
 
-     * Example:
-     *
-     *       block 1
-     *          |
-     *          v
-     *       block 3
-     *
-     * If block 3 contains:
-     *
-     *   %10 = phi x
-     *
-     * we append:
-     *
-     *   (%1, current_x)
-     */
+    * Example:
+    *
+    *       block 1
+    *          |
+    *          v
+    *       block 3
+    *
+    * If block 3 contains:
+    *
+    *   %10 = phi x
+    *
+    * we append:
+    *
+    *   (%1, current_x)
+    */
     let successors = function.successors(block_id);
 
     for successor in successors {
         let successor_locals: Vec<_> = {
-            let block = function.blocks
+            let block = function
+                .blocks
                 .iter()
                 .find(|block| block.id == successor)
                 .expect("successor block disappeared");
 
-            block.instructions
+            block
+                .instructions
                 .iter()
-                .filter_map(|instruction| {
-                    match instruction {
-                        IrInstruction::Phi { local, .. } => Some(*local),
-                        _ => None,
-                    }
+                .filter_map(|instruction| match instruction {
+                    IrInstruction::Phi { local, .. } => Some(*local),
+                    _ => None,
                 })
                 .collect()
         };
 
         for local in successor_locals {
             let value = current_value(stacks, local).ok_or_else(|| {
-                vec![
-                    CompilerError::internal(
-                        format!(
-                            "SSA: no value for local {:?} on edge {:?} -> {:?}",
-                            local,
-                            block_id,
-                            successor
-                        )
-                    )
-                ]
+                vec![CompilerError::internal(format!(
+                    "SSA: no value for local {:?} on edge {:?} -> {:?}",
+                    local, block_id, successor
+                ))]
             })?;
 
-            let block = function.blocks
+            let block = function
+                .blocks
                 .iter_mut()
                 .find(|block| block.id == successor)
                 .expect("successor block disappeared");
 
             for instruction in &mut block.instructions {
-                if let IrInstruction::Phi { local: phi_local, sources, .. } = instruction {
+                if let IrInstruction::Phi {
+                    local: phi_local,
+                    sources,
+                    ..
+                } = instruction
+                {
                     if *phi_local == local {
                         sources.push((block_id, value));
                     }
@@ -551,12 +577,9 @@ fn rename_block(
 
 fn current_value(
     stacks: &HashMap<crate::semantic::symbols::LocalId, Vec<ValueId>>,
-    local: crate::semantic::symbols::LocalId
+    local: crate::semantic::symbols::LocalId,
 ) -> Option<ValueId> {
-    stacks
-        .get(&local)
-        .and_then(|stack| stack.last())
-        .copied()
+    stacks.get(&local).and_then(|stack| stack.last()).copied()
 }
 
 fn resolve_alias(aliases: &HashMap<ValueId, ValueId>, mut value: ValueId) -> ValueId {
@@ -577,17 +600,19 @@ fn rewrite_terminator(terminator: Terminator, aliases: &HashMap<ValueId, ValueId
     match terminator {
         Terminator::Jump(block) => Terminator::Jump(block),
 
-        Terminator::Branch { condition, then_block, else_block } =>
-            Terminator::Branch {
-                condition: resolve_alias(aliases, condition),
-                then_block,
-                else_block,
-            },
+        Terminator::Branch {
+            condition,
+            then_block,
+            else_block,
+        } => Terminator::Branch {
+            condition: resolve_alias(aliases, condition),
+            then_block,
+            else_block,
+        },
 
-        Terminator::Return { value } =>
-            Terminator::Return {
-                value: value.map(|value| resolve_alias(aliases, value)),
-            },
+        Terminator::Return { value } => Terminator::Return {
+            value: value.map(|value| resolve_alias(aliases, value)),
+        },
 
         Terminator::Unreachable => Terminator::Unreachable,
     }
@@ -618,7 +643,7 @@ impl ValueAllocator {
                     max_value = Some(
                         max_value
                             .map(|current: usize| current.max(destination.0))
-                            .unwrap_or(destination.0)
+                            .unwrap_or(destination.0),
                     );
                 }
             }
@@ -638,7 +663,7 @@ impl ValueAllocator {
 
 fn instruction_destination(instruction: &IrInstruction) -> Option<ValueId> {
     match instruction {
-        | IrInstruction::Parameter { destination, .. }
+        IrInstruction::Parameter { destination, .. }
         | IrInstruction::ConstInt { destination, .. }
         | IrInstruction::ConstString { destination, .. }
         | IrInstruction::ConstBool { destination, .. }

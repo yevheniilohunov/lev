@@ -1,4 +1,4 @@
-use crate::{ compiler::source::Span, semantic::modifiers::Visibility };
+use crate::{compiler::source::Span, semantic::modifiers::Visibility};
 
 #[derive(Debug, Clone)]
 pub struct Program {
@@ -165,7 +165,7 @@ pub enum Expr {
 impl Expr {
     pub fn span(&self) -> Span {
         match self {
-            | Expr::Integer { span, .. }
+            Expr::Integer { span, .. }
             | Expr::String { span, .. }
             | Expr::Bool { span, .. }
             | Expr::Identifier { span, .. }

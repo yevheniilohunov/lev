@@ -1,32 +1,20 @@
-pub mod source;
 pub mod error;
+pub mod source;
 
-use crate::{
-    ir,
-    lexer,
-    parser,
-    semantic,
-};
+use crate::{ir, lexer, parser, semantic};
 
 use error::CompilerError;
 
-pub fn compile(
-    source: &str,
-) -> Result<ir::IrProgram, Vec<CompilerError>> {
-    let source_file =
-        source::SourceFile::new( source);
+pub fn compile(source: &str) -> Result<ir::IrProgram, Vec<CompilerError>> {
+    let source_file = source::SourceFile::new(source);
 
-    let tokens =
-        lexer::lex(&source_file)?;
+    let tokens = lexer::lex(&source_file)?;
 
-    let ast =
-        parser::parse(&source_file, &tokens)?;
+    let ast = parser::parse(&source_file, &tokens)?;
 
-    let hir =
-        semantic::analyze(ast, source_file)?;
+    let hir = semantic::analyze(ast, source_file)?;
 
-    let mut ir =
-        ir::lower::lower_to_ir(hir)?;
+    let mut ir = ir::lower::lower_to_ir(hir)?;
 
     /*
      * Validate the CFG before SSA construction.

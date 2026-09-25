@@ -14,11 +14,7 @@ pub struct CompilerError {
 }
 
 impl CompilerError {
-    pub fn new(
-        source: &str,
-        message: impl Into<String>,
-        span: SourceSpan,
-    ) -> Self {
+    pub fn new(source: &str, message: impl Into<String>, span: SourceSpan) -> Self {
         Self {
             message: message.into(),
             src: Some(source.to_owned()),

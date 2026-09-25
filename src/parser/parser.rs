@@ -1,22 +1,17 @@
 use crate::{
-    compiler::{ error::CompilerError, source::{ SourceFile, Span } },
+    compiler::{
+        error::CompilerError,
+        source::{SourceFile, Span},
+    },
     parser::ast::ConstructorDecl,
     semantic::modifiers::Visibility,
 };
 
 use super::ast::{
-    BinaryOp,
-    Expr,
-    FieldDecl,
-    FunctionDecl,
-    Param,
-    Program,
-    Stmt,
-    StructDecl,
-    TypeName,
+    BinaryOp, Expr, FieldDecl, FunctionDecl, Param, Program, Stmt, StructDecl, TypeName,
 };
 
-use crate::lexer::token::{ Token, TokenKind };
+use crate::lexer::token::{Token, TokenKind};
 
 pub fn parse(source: &SourceFile, tokens: &[Token]) -> Result<Program, Vec<CompilerError>> {
     let mut parser = Parser::new(source, tokens);
@@ -185,7 +180,10 @@ impl<'a> Parser<'a> {
 
         let ty = self.parse_type()?;
 
-        self.expect(&TokenKind::Semicolon, "expected ';' after field declaration")?;
+        self.expect(
+            &TokenKind::Semicolon,
+            "expected ';' after field declaration",
+        )?;
 
         let end = self.previous_span().end;
 
@@ -353,7 +351,10 @@ impl<'a> Parser<'a> {
 
         let value = self.parse_expression()?;
 
-        self.expect(&TokenKind::Semicolon, "expected ';' after variable declaration")?;
+        self.expect(
+            &TokenKind::Semicolon,
+            "expected ';' after variable declaration",
+        )?;
 
         Ok(Stmt::Let {
             name,
@@ -378,7 +379,10 @@ impl<'a> Parser<'a> {
 
         let value = self.parse_expression()?;
 
-        self.expect(&TokenKind::Semicolon, "expected ';' after variable declaration")?;
+        self.expect(
+            &TokenKind::Semicolon,
+            "expected ';' after variable declaration",
+        )?;
 
         Ok(Stmt::Const {
             name,
@@ -612,35 +616,30 @@ impl<'a> Parser<'a> {
                     span: Span::new(token.span.start, self.previous_span().end),
                 }
             }
-            TokenKind::Integer(value) =>
-                Expr::Integer {
-                    value,
-                    span: token.span,
-                },
+            TokenKind::Integer(value) => Expr::Integer {
+                value,
+                span: token.span,
+            },
 
-            TokenKind::String(value) =>
-                Expr::String {
-                    value,
-                    span: token.span,
-                },
+            TokenKind::String(value) => Expr::String {
+                value,
+                span: token.span,
+            },
 
-            TokenKind::True =>
-                Expr::Bool {
-                    value: true,
-                    span: token.span,
-                },
+            TokenKind::True => Expr::Bool {
+                value: true,
+                span: token.span,
+            },
 
-            TokenKind::False =>
-                Expr::Bool {
-                    value: false,
-                    span: token.span,
-                },
+            TokenKind::False => Expr::Bool {
+                value: false,
+                span: token.span,
+            },
 
-            TokenKind::Identifier(name) =>
-                Expr::Identifier {
-                    name,
-                    span: token.span,
-                },
+            TokenKind::Identifier(name) => Expr::Identifier {
+                name,
+                span: token.span,
+            },
 
             TokenKind::LeftParen => {
                 let expression = self.parse_expression()?;
@@ -658,12 +657,10 @@ impl<'a> Parser<'a> {
                 let arguments = self.parse_call_arguments()?;
 
                 let Expr::Identifier { name, span } = expression else {
-                    return Err(
-                        self.error_at(
-                            "only function names can be called directly",
-                            expression.span()
-                        )
-                    );
+                    return Err(self.error_at(
+                        "only function names can be called directly",
+                        expression.span(),
+                    ));
                 };
 
                 expression = Expr::Call {
@@ -758,12 +755,10 @@ impl<'a> Parser<'a> {
 
             position += 1;
 
-            if
-                !matches!(
-                    self.tokens.get(position).map(|token| &token.kind),
-                    Some(TokenKind::Identifier(_))
-                )
-            {
+            if !matches!(
+                self.tokens.get(position).map(|token| &token.kind),
+                Some(TokenKind::Identifier(_))
+            ) {
                 return false;
             }
 
@@ -786,7 +781,11 @@ impl<'a> Parser<'a> {
     }
 
     fn expect(&mut self, expected: &TokenKind, message: &str) -> Result<Token, CompilerError> {
-        if self.check(expected) { Ok(self.advance()) } else { Err(self.error_here(message)) }
+        if self.check(expected) {
+            Ok(self.advance())
+        } else {
+            Err(self.error_here(message))
+        }
     }
 
     fn consume(&mut self, kind: &TokenKind) -> bool {
@@ -803,12 +802,12 @@ impl<'a> Parser<'a> {
     }
 
     fn advance(&mut self) -> Token {
-        let token = self.tokens
-            .get(self.position)
-            .cloned()
-            .unwrap_or_else(|| {
-                self.tokens.last().cloned().expect("parser requires at least EOF token")
-            });
+        let token = self.tokens.get(self.position).cloned().unwrap_or_else(|| {
+            self.tokens
+                .last()
+                .cloned()
+                .expect("parser requires at least EOF token")
+        });
 
         if self.position < self.tokens.len() {
             self.position += 1;
@@ -820,7 +819,7 @@ impl<'a> Parser<'a> {
     fn peek(&self) -> &Token {
         self.tokens
             .get(self.position)
-            .unwrap_or_else(|| { self.tokens.last().expect("missing EOF token") })
+            .unwrap_or_else(|| self.tokens.last().expect("missing EOF token"))
     }
 
     fn current_span(&self) -> Span {
@@ -828,7 +827,11 @@ impl<'a> Parser<'a> {
     }
 
     fn previous_span(&self) -> Span {
-        if self.position == 0 { self.current_span() } else { self.tokens[self.position - 1].span }
+        if self.position == 0 {
+            self.current_span()
+        } else {
+            self.tokens[self.position - 1].span
+        }
     }
 
     fn error_here(&self, message: &str) -> CompilerError {
@@ -842,7 +845,7 @@ impl<'a> Parser<'a> {
 
 fn expression_start(expr: &Expr) -> usize {
     match expr {
-        | Expr::Integer { span, .. }
+        Expr::Integer { span, .. }
         | Expr::String { span, .. }
         | Expr::Bool { span, .. }
         | Expr::Identifier { span, .. }
@@ -855,7 +858,7 @@ fn expression_start(expr: &Expr) -> usize {
 
 fn expression_end(expr: &Expr) -> usize {
     match expr {
-        | Expr::Integer { span, .. }
+        Expr::Integer { span, .. }
         | Expr::String { span, .. }
         | Expr::Bool { span, .. }
         | Expr::Identifier { span, .. }

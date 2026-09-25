@@ -1,6 +1,6 @@
-use std::{ collections::HashSet, fmt };
+use std::{collections::HashSet, fmt};
 
-use crate::semantic::symbols::{ FunctionId, LocalId, StructId };
+use crate::semantic::symbols::{FunctionId, LocalId, StructId};
 
 use crate::semantic::types::Type;
 
@@ -197,7 +197,11 @@ impl IrFunction {
         match &block.terminator {
             Terminator::Jump(target) => vec![*target],
 
-            Terminator::Branch { then_block, else_block, .. } => {
+            Terminator::Branch {
+                then_block,
+                else_block,
+                ..
+            } => {
                 if then_block == else_block {
                     vec![*then_block]
                 } else {
@@ -205,7 +209,7 @@ impl IrFunction {
                 }
             }
 
-            Terminator::Return { .. } | Terminator::Unreachable => { Vec::new() }
+            Terminator::Return { .. } | Terminator::Unreachable => Vec::new(),
         }
     }
 

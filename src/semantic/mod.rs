@@ -1,8 +1,8 @@
 mod analyzer;
 pub mod hir;
-pub mod scope;
-pub mod types;
-pub mod symbols;
 pub mod modifiers;
+pub mod scope;
+pub mod symbols;
+pub mod types;
 
 pub use analyzer::analyze;

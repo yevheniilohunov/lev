@@ -1,6 +1,6 @@
-use std::collections::{ HashMap, HashSet };
+use std::collections::{HashMap, HashSet};
 
-use crate::{ compiler::error::CompilerError, semantic::symbols::FunctionId };
+use crate::{compiler::error::CompilerError, semantic::symbols::FunctionId};
 
 use super::ir::*;
 
@@ -50,28 +50,67 @@ impl<'a> Validator<'a> {
             for instruction in &block.instructions {
                 match instruction {
                     IrInstruction::LoadLocal { .. } => {
-                        self.error(
-                            format!(
-                                "function '{}': LoadLocal remains after SSA construction in block {}",
-                                function.name,
-                                block.id.0
-                            )
-                        );
+                        self.error(format!(
+                            "function '{}': LoadLocal remains after SSA construction in block {}",
+                            function.name, block.id.0
+                        ));
                     }
 
                     IrInstruction::StoreLocal { .. } => {
-                        self.error(
-                            format!(
-                                "function '{}': StoreLocal remains after SSA construction in block {}",
-                                function.name,
-                                block.id.0
-                            )
-                        );
+                        self.error(format!(
+                            "function '{}': StoreLocal remains after SSA construction in block {}",
+                            function.name, block.id.0
+                        ));
                     }
 
                     _ => {}
                 }
             }
+        }
+    }
+
+    fn instruction_type(&self, instruction: &IrInstruction) -> Option<IrType> {
+        match instruction {
+            IrInstruction::Parameter { local, .. } => {
+                // Look up the parameter/local type.
+            }
+
+            IrInstruction::ConstInt { .. } => Some(IrType::Int),
+            IrInstruction::ConstString { .. } => Some(IrType::String),
+            IrInstruction::ConstBool { .. } => Some(IrType::Bool),
+
+            IrInstruction::LoadLocal { .. } => {
+                // local type
+            }
+
+            IrInstruction::StructCopy { struct_id, .. }
+            | IrInstruction::AllocStruct { struct_id, .. } => Some(IrType::Struct(*struct_id)),
+
+            IrInstruction::LoadField {
+                receiver: _,
+                field: _,
+                ..
+            } => {
+                // Look up receiver struct and field type.
+            }
+
+            IrInstruction::Binary { op, .. } => match op {
+                IrBinaryOp::Equal => Some(IrType::Bool),
+                IrBinaryOp::Add
+                | IrBinaryOp::Subtract
+                | IrBinaryOp::Multiply
+                | IrBinaryOp::Divide => Some(IrType::Int),
+            },
+
+            IrInstruction::Call { destination, .. } => {
+                // destination's type comes from called function
+            }
+
+            IrInstruction::Phi { .. } => {
+                // infer from incoming values
+            }
+
+            IrInstruction::StoreLocal { .. } | IrInstruction::StoreField { .. } => None,
         }
     }
 
@@ -105,9 +144,10 @@ impl<'a> Validator<'a> {
 
     fn validate_entry(&mut self, function: &IrFunction) {
         if function.entry.0 >= function.blocks.len() {
-            self.error(
-                format!("function '{}': invalid entry block {}", function.name, function.entry.0)
-            );
+            self.error(format!(
+                "function '{}': invalid entry block {}",
+                function.name, function.entry.0
+            ));
         }
     }
 
@@ -116,20 +156,17 @@ impl<'a> Validator<'a> {
 
         for (index, block) in function.blocks.iter().enumerate() {
             if block.id.0 != index {
-                self.error(
-                    format!(
-                        "function '{}': block id {} does not match position {}",
-                        function.name,
-                        block.id.0,
-                        index
-                    )
-                );
+                self.error(format!(
+                    "function '{}': block id {} does not match position {}",
+                    function.name, block.id.0, index
+                ));
             }
 
             if !ids.insert(block.id) {
-                self.error(
-                    format!("function '{}': duplicate block id {}", function.name, block.id.0)
-                );
+                self.error(format!(
+                    "function '{}': duplicate block id {}",
+                    function.name, block.id.0
+                ));
             }
 
             self.validate_terminator_targets(function, block);
@@ -142,7 +179,11 @@ impl<'a> Validator<'a> {
                 self.validate_block_target(function, block.id, *target);
             }
 
-            Terminator::Branch { then_block, else_block, .. } => {
+            Terminator::Branch {
+                then_block,
+                else_block,
+                ..
+            } => {
                 self.validate_block_target(function, block.id, *then_block);
 
                 self.validate_block_target(function, block.id, *else_block);
@@ -154,14 +195,10 @@ impl<'a> Validator<'a> {
 
     fn validate_block_target(&mut self, function: &IrFunction, source: BlockId, target: BlockId) {
         if target.0 >= function.blocks.len() {
-            self.error(
-                format!(
-                    "function '{}': block {} references invalid block {}",
-                    function.name,
-                    source.0,
-                    target.0
-                )
-            );
+            self.error(format!(
+                "function '{}': block {} references invalid block {}",
+                function.name, source.0, target.0
+            ));
         }
     }
 
@@ -170,40 +207,37 @@ impl<'a> Validator<'a> {
 
         for local in &function.parameters {
             if !locals.insert(local.id) {
-                self.error(
-                    format!("function '{}': duplicate local id {}", function.name, local.id.0)
-                );
+                self.error(format!(
+                    "function '{}': duplicate local id {}",
+                    function.name, local.id.0
+                ));
             }
         }
 
         for local in &function.locals {
             if !locals.insert(local.id) {
-                self.error(
-                    format!("function '{}': duplicate local id {}", function.name, local.id.0)
-                );
+                self.error(format!(
+                    "function '{}': duplicate local id {}",
+                    function.name, local.id.0
+                ));
             }
         }
 
         for block in &function.blocks {
             for instruction in &block.instructions {
                 match instruction {
-                    | IrInstruction::LoadLocal { local, .. }
+                    IrInstruction::LoadLocal { local, .. }
                     | IrInstruction::StoreLocal { local, .. }
                     | IrInstruction::Parameter { local, .. }
-                    | IrInstruction::Phi { local, .. } => {
-                        match !locals.contains(local) {
-                            true => {
-                                self.error(
-                                    format!(
-                                        "function '{}': unknown local {}",
-                                        function.name,
-                                        local.0
-                                    )
-                                );
-                            }
-                            false => (),
+                    | IrInstruction::Phi { local, .. } => match !locals.contains(local) {
+                        true => {
+                            self.error(format!(
+                                "function '{}': unknown local {}",
+                                function.name, local.0
+                            ));
                         }
-                    }
+                        false => (),
+                    },
 
                     _ => {}
                 }
@@ -212,24 +246,24 @@ impl<'a> Validator<'a> {
     }
 
     fn validate_calls(&mut self, function: &IrFunction) {
-        let functions: HashSet<FunctionId> = self.program.functions
+        let functions: HashSet<FunctionId> = self
+            .program
+            .functions
             .iter()
             .map_while(|function| function.id)
             .collect();
 
         for block in &function.blocks {
             for instruction in &block.instructions {
-                if
-                    let IrInstruction::Call { function: target, .. } = instruction &&
-                    !functions.contains(target)
+                if let IrInstruction::Call {
+                    function: target, ..
+                } = instruction
+                    && !functions.contains(target)
                 {
-                    self.error(
-                        format!(
-                            "function '{}': call references unknown function #{}",
-                            function.name,
-                            target.0
-                        )
-                    );
+                    self.error(format!(
+                        "function '{}': call references unknown function #{}",
+                        function.name, target.0
+                    ));
                 }
             }
         }
@@ -243,17 +277,19 @@ impl<'a> Validator<'a> {
 
             match (&function.return_type, value) {
                 (IrType::Void, Some(_)) => {
-                    self.error(
-                        format!("function '{}': void function returns a value", function.name)
-                    );
+                    self.error(format!(
+                        "function '{}': void function returns a value",
+                        function.name
+                    ));
                 }
 
                 (IrType::Void, None) => {}
 
                 (_, None) => {
-                    self.error(
-                        format!("function '{}': non-void function has empty return", function.name)
-                    );
+                    self.error(format!(
+                        "function '{}': non-void function has empty return",
+                        function.name
+                    ));
                 }
 
                 (_, Some(_)) => {}
@@ -270,17 +306,13 @@ impl<'a> Validator<'a> {
             }
 
             for instruction in &block.instructions {
-                if
-                    let Some(destination) = instruction_destination(instruction) &&
-                    definitions.insert(destination, block.id).is_some()
+                if let Some(destination) = instruction_destination(instruction)
+                    && definitions.insert(destination, block.id).is_some()
                 {
-                    self.error(
-                        format!(
-                            "function '{}': value %{} is defined more than once",
-                            function.name,
-                            destination.0
-                        )
-                    );
+                    self.error(format!(
+                        "function '{}': value %{} is defined more than once",
+                        function.name, destination.0
+                    ));
                 }
             }
         }
@@ -296,7 +328,7 @@ impl<'a> Validator<'a> {
                     block.id,
                     instruction,
                     &definitions,
-                    dominance
+                    dominance,
                 );
             }
 
@@ -305,7 +337,7 @@ impl<'a> Validator<'a> {
                 block.id,
                 &block.terminator,
                 &definitions,
-                dominance
+                dominance,
             );
         }
     }
@@ -316,10 +348,10 @@ impl<'a> Validator<'a> {
         use_block: BlockId,
         instruction: &IrInstruction,
         definitions: &HashMap<ValueId, BlockId>,
-        dominance: &DominanceInfo
+        dominance: &DominanceInfo,
     ) {
         match instruction {
-            | IrInstruction::ConstInt { .. }
+            IrInstruction::ConstInt { .. }
             | IrInstruction::ConstString { .. }
             | IrInstruction::ConstBool { .. }
             | IrInstruction::LoadLocal { .. }
@@ -345,11 +377,11 @@ impl<'a> Validator<'a> {
                 self.validate_phi_sources(function, use_block, sources, definitions, dominance);
             }
             IrInstruction::LoadField { receiver, .. } => {
-                {
-                    self.require_value(function, use_block, *receiver, definitions, dominance);
-                }
+                self.require_value(function, use_block, *receiver, definitions, dominance);
             }
-            IrInstruction::StoreField { receiver, value, .. } => {
+            IrInstruction::StoreField {
+                receiver, value, ..
+            } => {
                 self.require_value(function, use_block, *receiver, definitions, dominance);
 
                 self.require_value(function, use_block, *value, definitions, dominance);
@@ -367,7 +399,7 @@ impl<'a> Validator<'a> {
         phi_block: BlockId,
         sources: &[(BlockId, ValueId)],
         definitions: &HashMap<ValueId, BlockId>,
-        dominance: &DominanceInfo
+        dominance: &DominanceInfo,
     ) {
         let predecessors = function.predecessors(phi_block);
 
@@ -386,14 +418,10 @@ impl<'a> Validator<'a> {
             }
 
             if !incoming_blocks.insert(*predecessor) {
-                self.error(
-                    format!(
-                        "function '{}': phi in block {} has duplicate incoming block {}",
-                        function.name,
-                        phi_block.0,
-                        predecessor.0
-                    )
-                );
+                self.error(format!(
+                    "function '{}': phi in block {} has duplicate incoming block {}",
+                    function.name, phi_block.0, predecessor.0
+                ));
             }
 
             let Some(&definition_block) = definitions.get(value) else {
@@ -449,7 +477,7 @@ impl<'a> Validator<'a> {
         use_block: BlockId,
         terminator: &Terminator,
         definitions: &HashMap<ValueId, BlockId>,
-        dominance: &DominanceInfo
+        dominance: &DominanceInfo,
     ) {
         match terminator {
             Terminator::Jump(_) => {}
@@ -474,16 +502,13 @@ impl<'a> Validator<'a> {
         use_block: BlockId,
         value: ValueId,
         definitions: &HashMap<ValueId, BlockId>,
-        dominance: &DominanceInfo
+        dominance: &DominanceInfo,
     ) {
         let Some(&definition_block) = definitions.get(&value) else {
-            self.error(
-                format!(
-                    "function '{}': value %{} is used but never defined",
-                    function.name,
-                    value.0
-                )
-            );
+            self.error(format!(
+                "function '{}': value %{} is used but never defined",
+                function.name, value.0
+            ));
             return;
         };
 
@@ -506,25 +531,26 @@ impl<'a> Validator<'a> {
                 continue;
             }
 
-            let dominators = dominance.dominators.get(&block.id).cloned().unwrap_or_default();
+            let dominators = dominance
+                .dominators
+                .get(&block.id)
+                .cloned()
+                .unwrap_or_default();
 
             if !dominators.contains(&block.id) {
-                self.error(
-                    format!(
-                        "function '{}': block {} does not dominate itself",
-                        function.name,
-                        block.id.0
-                    )
-                );
+                self.error(format!(
+                    "function '{}': block {} does not dominate itself",
+                    function.name, block.id.0
+                ));
             }
 
-            if
-                block.id == function.entry &&
-                (dominators.len() != 1 || !dominators.contains(&function.entry))
+            if block.id == function.entry
+                && (dominators.len() != 1 || !dominators.contains(&function.entry))
             {
-                self.error(
-                    format!("function '{}': entry block has invalid dominator set", function.name)
-                );
+                self.error(format!(
+                    "function '{}': entry block has invalid dominator set",
+                    function.name
+                ));
             }
         }
     }
@@ -536,7 +562,7 @@ impl<'a> Validator<'a> {
 
 fn instruction_destination(instruction: &IrInstruction) -> Option<ValueId> {
     match instruction {
-        | IrInstruction::ConstInt { destination, .. }
+        IrInstruction::ConstInt { destination, .. }
         | IrInstruction::ConstString { destination, .. }
         | IrInstruction::ConstBool { destination, .. }
         | IrInstruction::LoadLocal { destination, .. }
@@ -578,11 +604,8 @@ impl DominanceInfo {
 
         let immediate_dominator = compute_immediate_dominators(function, &dominators, &reachable);
 
-        let dominance_frontier = compute_dominance_frontier(
-            function,
-            &immediate_dominator,
-            &reachable
-        );
+        let dominance_frontier =
+            compute_dominance_frontier(function, &immediate_dominator, &reachable);
 
         Self {
             reachable,
@@ -610,7 +633,7 @@ impl DominanceInfo {
 
 fn compute_dominator_sets(
     function: &IrFunction,
-    reachable: &HashSet<BlockId>
+    reachable: &HashSet<BlockId>,
 ) -> HashMap<BlockId, HashSet<BlockId>> {
     let mut dominators = HashMap::new();
 
@@ -671,7 +694,7 @@ fn compute_dominator_sets(
 fn compute_immediate_dominators(
     function: &IrFunction,
     dominators: &HashMap<BlockId, HashSet<BlockId>>,
-    reachable: &HashSet<BlockId>
+    reachable: &HashSet<BlockId>,
 ) -> HashMap<BlockId, Option<BlockId>> {
     let mut result = HashMap::new();
 
@@ -692,12 +715,8 @@ fn compute_immediate_dominators(
             .filter(|candidate| *candidate != block.id)
             .collect();
 
-        strict_dominators.sort_by_key(|candidate| {
-            dominators
-                .get(candidate)
-                .map(|set| set.len())
-                .unwrap_or(0)
-        });
+        strict_dominators
+            .sort_by_key(|candidate| dominators.get(candidate).map(|set| set.len()).unwrap_or(0));
 
         let immediate = strict_dominators.pop();
 
@@ -710,7 +729,7 @@ fn compute_immediate_dominators(
 fn compute_dominance_frontier(
     function: &IrFunction,
     immediate_dominator: &HashMap<BlockId, Option<BlockId>>,
-    reachable: &HashSet<BlockId>
+    reachable: &HashSet<BlockId>,
 ) -> HashMap<BlockId, HashSet<BlockId>> {
     let mut frontier = HashMap::new();
 

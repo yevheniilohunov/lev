@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::{ symbols::LocalId, types::Type };
+use super::{symbols::LocalId, types::Type};
 
 #[derive(Debug, Default)]
 pub struct Scope {
@@ -17,12 +17,16 @@ impl Scope {
     }
 
     pub fn declare(&mut self, name: String, ty: Type, mutable: bool) -> Result<LocalId, String> {
-        let current_scope = self.scopes
+        let current_scope = self
+            .scopes
             .last_mut()
             .expect("scope stack must always contain a root scope");
 
         if current_scope.contains_key(&name) {
-            return Err(format!("variable '{}' is already declared in this scope", name));
+            return Err(format!(
+                "variable '{}' is already declared in this scope",
+                name
+            ));
         }
 
         /*
@@ -88,6 +92,8 @@ impl Scope {
     }
 
     pub fn is_mutable(&self, id: LocalId) -> bool {
-        self.locals.get(id.0).map_or_default(|(_, _, _, mutable)| *mutable)
+        self.locals
+            .get(id.0)
+            .map_or_default(|(_, _, _, mutable)| *mutable)
     }
 }

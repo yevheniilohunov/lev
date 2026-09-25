@@ -3,7 +3,7 @@ use std::fmt;
 use crate::compiler::source::Span;
 use crate::semantic::symbols::ConstructorId;
 
-use super::symbols::{ FunctionId, LocalId, StructId };
+use super::symbols::{FunctionId, LocalId, StructId};
 
 use super::types::Type;
 
@@ -27,18 +27,19 @@ pub struct HirField {
     pub ty: Type,
 }
 
-#[derive(Debug)] pub struct HirFunction { 
+#[derive(Debug)]
+pub struct HirFunction {
     pub id: Option<FunctionId>,
     pub constructor_id: Option<ConstructorId>,
-    pub name: String, 
-    // None for top-level functions. 
-    // Some(struct_id) for struct methods. 
-    pub owner: Option<StructId>, 
-    pub params: Vec<HirParam>, 
-    pub locals: Vec<HirLocal>, 
-    pub return_type: Type, 
+    pub name: String,
+    // None for top-level functions.
+    // Some(struct_id) for struct methods.
+    pub owner: Option<StructId>,
+    pub params: Vec<HirParam>,
+    pub locals: Vec<HirLocal>,
+    pub return_type: Type,
     pub body: HirBlock,
- }
+}
 
 #[derive(Debug)]
 pub struct HirParam {
@@ -114,7 +115,11 @@ pub struct HirExpr {
 
 impl fmt::Display for HirExpr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "ty {:?} start to end {}..{} and HirExprKind {:?}", self.ty, self.span.start, self.span.end, self.kind)
+        write!(
+            f,
+            "ty {:?} start to end {}..{} and HirExprKind {:?}",
+            self.ty, self.span.start, self.span.end, self.kind
+        )
     }
 }
 

@@ -30,7 +30,7 @@ impl Span {
 impl SourceFile {
     pub fn new(src_file: &str) -> Self {
         Self {
-            text: Arc::new(src_file.to_owned())
+            text: Arc::new(src_file.to_owned()),
         }
     }
 

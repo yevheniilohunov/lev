@@ -2,12 +2,12 @@ use std::collections::HashSet;
 
 use crate::compiler::error::CompilerError;
 use crate::compiler::source::SourceFile;
-use crate::compiler::{ source::Span };
+use crate::compiler::source::Span;
 
 use crate::parser::ast::*;
 use crate::semantic::modifiers::Visibility;
 
-use super::{ hir::*, scope::Scope, symbols::*, types::Type };
+use super::{hir::*, scope::Scope, symbols::*, types::Type};
 
 pub fn analyze(program: Program, source: SourceFile) -> Result<HirProgram, Vec<CompilerError>> {
     let mut analyzer = Analyzer::new(&source);
@@ -95,12 +95,10 @@ impl<'a> Analyzer<'a> {
 
         for parameter in &constructor.params {
             if !seen_parameters.insert(parameter.name.clone()) {
-                self.errors.push(
-                    self.error_at(
-                        format!("parameter '{}' is duplicated", parameter.name),
-                        parameter.span
-                    )
-                );
+                self.errors.push(self.error_at(
+                    format!("parameter '{}' is duplicated", parameter.name),
+                    parameter.span,
+                ));
                 continue;
             }
 
@@ -122,25 +120,30 @@ impl<'a> Analyzer<'a> {
         let mut seen_parameters = HashSet::new();
         for parameter in &function.params {
             if !seen_parameters.insert(parameter.name.clone()) {
-                self.errors.push(
-                    self.error_at(
-                        format!("parameter '{}' is duplicated", parameter.name),
-                        parameter.span
-                    )
-                );
+                self.errors.push(self.error_at(
+                    format!("parameter '{}' is duplicated", parameter.name),
+                    parameter.span,
+                ));
                 continue;
             }
             if let Some(ty) = self.resolve_type(&parameter.ty, parameter.span) {
-                parameters.push(ParameterSymbol { name: parameter.name.clone(), ty });
+                parameters.push(ParameterSymbol {
+                    name: parameter.name.clone(),
+                    ty,
+                });
             }
         }
         let return_type = self
             .resolve_type(&function.return_type, function.span)
             .unwrap_or(Type::Void);
         let result = match owner {
-            Some(struct_id) =>
-                self.symbols.add_method(struct_id, function.name.clone(), parameters, return_type),
-            None => self.symbols.add_function(function.name.clone(), parameters, return_type),
+            Some(struct_id) => {
+                self.symbols
+                    .add_method(struct_id, function.name.clone(), parameters, return_type)
+            }
+            None => self
+                .symbols
+                .add_function(function.name.clone(), parameters, return_type),
         };
         if let Err(error) = result {
             self.errors.push(self.error_at(error, function.span));
@@ -158,17 +161,17 @@ impl<'a> Analyzer<'a> {
             for field in &structure.fields {
                 let ty = self.resolve_type(&field.ty, field.span);
 
-                if fields.iter().any(|existing: &FieldSymbol| existing.name == field.name) {
-                    self.errors.push(
-                        self.error_at(
-                            format!(
-                                "field '{}' is already declared in struct '{}'",
-                                field.name,
-                                structure.name
-                            ),
-                            field.span
-                        )
-                    );
+                if fields
+                    .iter()
+                    .any(|existing: &FieldSymbol| existing.name == field.name)
+                {
+                    self.errors.push(self.error_at(
+                        format!(
+                            "field '{}' is already declared in struct '{}'",
+                            field.name, structure.name
+                        ),
+                        field.span,
+                    ));
                     continue;
                 }
 
@@ -203,7 +206,8 @@ impl<'a> Analyzer<'a> {
             return Some(Type::Struct(struct_id));
         }
 
-        self.errors.push(self.error_at(format!("unknown type '{}'", name), span));
+        self.errors
+            .push(self.error_at(format!("unknown type '{}'", name), span));
 
         None
     }
@@ -223,7 +227,8 @@ impl<'a> Analyzer<'a> {
 
             let struct_symbol = self.symbols.struct_symbol(struct_id);
 
-            let fields = struct_symbol.fields
+            let fields = struct_symbol
+                .fields
                 .iter()
                 .map(|field| HirField {
                     name: field.name.clone(),
@@ -262,11 +267,8 @@ impl<'a> Analyzer<'a> {
                     span: struct_decl.span,
                 };
 
-                let hir_function = self.analyze_constructor(
-                    &constructor,
-                    constructor_id,
-                    struct_id
-                );
+                let hir_function =
+                    self.analyze_constructor(&constructor, constructor_id, struct_id);
 
                 hir_functions.push(hir_function);
             } else {
@@ -275,11 +277,8 @@ impl<'a> Analyzer<'a> {
                         continue;
                     };
 
-                    let hir_function = self.analyze_constructor(
-                        constructor,
-                        constructor_id,
-                        struct_id
-                    );
+                    let hir_function =
+                        self.analyze_constructor(constructor, constructor_id, struct_id);
 
                     hir_functions.push(hir_function);
                 }
@@ -305,7 +304,7 @@ impl<'a> Analyzer<'a> {
         &mut self,
         constructor: &ConstructorDecl,
         constructor_id: ConstructorId,
-        owner: StructId
+        owner: StructId,
     ) -> HirFunction {
         let symbol = self.symbols.constructor_symbol(constructor_id).clone();
 
@@ -347,12 +346,10 @@ impl<'a> Analyzer<'a> {
 
         if !constructor.base_arguments.is_empty() {
             let Some(base_struct_id) = self.symbols.struct_base(owner) else {
-                self.errors.push(
-                    self.error_at(
-                        "constructor forwards arguments to base, but this struct has no base struct",
-                        constructor.span
-                    )
-                );
+                self.errors.push(self.error_at(
+                    "constructor forwards arguments to base, but this struct has no base struct",
+                    constructor.span,
+                ));
 
                 return self.build_constructor_hir_function(
                     constructor,
@@ -362,20 +359,18 @@ impl<'a> Analyzer<'a> {
                     scope,
                     HirBlock {
                         statements: Vec::new(),
-                    }
+                    },
                 );
             };
 
             let Some(base_constructor_id) = self.symbols.find_constructor(base_struct_id) else {
-                self.errors.push(
-                    self.error_at(
-                        format!(
-                            "base struct '{}' has no constructor",
-                            self.symbols.struct_symbol(base_struct_id).name
-                        ),
-                        constructor.span
-                    )
-                );
+                self.errors.push(self.error_at(
+                    format!(
+                        "base struct '{}' has no constructor",
+                        self.symbols.struct_symbol(base_struct_id).name
+                    ),
+                    constructor.span,
+                ));
 
                 return self.build_constructor_hir_function(
                     constructor,
@@ -385,24 +380,22 @@ impl<'a> Analyzer<'a> {
                     scope,
                     HirBlock {
                         statements: Vec::new(),
-                    }
+                    },
                 );
             };
 
             let base_constructor = self.symbols.constructor_symbol(base_constructor_id).clone();
 
             if constructor.base_arguments.len() != base_constructor.parameters.len() {
-                self.errors.push(
-                    self.error_at(
-                        format!(
-                            "base constructor '{}' expects {} argument(s), found {}",
-                            self.symbols.struct_symbol(base_struct_id).name,
-                            base_constructor.parameters.len(),
-                            constructor.base_arguments.len()
-                        ),
-                        constructor.span
-                    )
-                );
+                self.errors.push(self.error_at(
+                    format!(
+                        "base constructor '{}' expects {} argument(s), found {}",
+                        self.symbols.struct_symbol(base_struct_id).name,
+                        base_constructor.parameters.len(),
+                        constructor.base_arguments.len()
+                    ),
+                    constructor.span,
+                ));
             }
 
             let mut arguments = Vec::with_capacity(constructor.base_arguments.len() + 1);
@@ -410,12 +403,10 @@ impl<'a> Analyzer<'a> {
             let self_local = match scope.lookup("this") {
                 Some(local) => local,
                 None => {
-                    self.errors.push(
-                        self.error_at(
-                            "internal error: constructor receiver 'this' was not declared",
-                            constructor.span
-                        )
-                    );
+                    self.errors.push(self.error_at(
+                        "internal error: constructor receiver 'this' was not declared",
+                        constructor.span,
+                    ));
 
                     return self.build_constructor_hir_function(
                         constructor,
@@ -425,7 +416,7 @@ impl<'a> Analyzer<'a> {
                         scope,
                         HirBlock {
                             statements: Vec::new(),
-                        }
+                        },
                     );
                 }
             };
@@ -441,45 +432,39 @@ impl<'a> Analyzer<'a> {
 
                 if let Some(parameter) = base_constructor.parameters.get(index) {
                     if value.ty != parameter.ty {
-                        self.errors.push(
-                            self.error_at(
-                                format!(
-                                    "argument {} of base constructor '{}' has type {:?}, expected {:?}",
-                                    index + 1,
-                                    self.symbols.struct_symbol(base_struct_id).name,
-                                    value.ty,
-                                    parameter.ty
-                                ),
-                                value.span
-                            )
-                        );
+                        self.errors.push(self.error_at(
+                            format!(
+                                "argument {} of base constructor '{}' has type {:?}, expected {:?}",
+                                index + 1,
+                                self.symbols.struct_symbol(base_struct_id).name,
+                                value.ty,
+                                parameter.ty
+                            ),
+                            value.span,
+                        ));
                     }
                 }
 
                 arguments.push(value);
             }
 
-            base_call = Some(
-                HirStmt::Expr(HirExpr {
-                    kind: HirExprKind::ConstructorCall {
-                        constructor: base_constructor_id,
-                        arguments,
-                    },
-                    ty: Type::Void,
-                    span: constructor.span,
-                })
-            );
+            base_call = Some(HirStmt::Expr(HirExpr {
+                kind: HirExprKind::ConstructorCall {
+                    constructor: base_constructor_id,
+                    arguments,
+                },
+                ty: Type::Void,
+                span: constructor.span,
+            }));
         } else if let Some(base_struct_id) = self.symbols.struct_base(owner) {
             let Some(base_constructor_id) = self.symbols.find_constructor(base_struct_id) else {
-                self.errors.push(
-                    self.error_at(
-                        format!(
-                            "base struct '{}' has no constructor",
-                            self.symbols.struct_symbol(base_struct_id).name
-                        ),
-                        constructor.span
-                    )
-                );
+                self.errors.push(self.error_at(
+                    format!(
+                        "base struct '{}' has no constructor",
+                        self.symbols.struct_symbol(base_struct_id).name
+                    ),
+                    constructor.span,
+                ));
 
                 return self.build_constructor_hir_function(
                     constructor,
@@ -488,10 +473,8 @@ impl<'a> Analyzer<'a> {
                     params,
                     scope,
                     HirBlock {
-                        statements: vec![HirStmt::Return {
-                            value: None,
-                        }],
-                    }
+                        statements: vec![HirStmt::Return { value: None }],
+                    },
                 );
             };
 
@@ -517,22 +500,18 @@ impl<'a> Analyzer<'a> {
                     params,
                     scope,
                     HirBlock {
-                        statements: vec![HirStmt::Return {
-                            value: None,
-                        }],
-                    }
+                        statements: vec![HirStmt::Return { value: None }],
+                    },
                 );
             }
 
             let self_local = match scope.lookup("this") {
                 Some(local) => local,
                 None => {
-                    self.errors.push(
-                        self.error_at(
-                            "internal error: constructor receiver 'this' was not declared",
-                            constructor.span
-                        )
-                    );
+                    self.errors.push(self.error_at(
+                        "internal error: constructor receiver 'this' was not declared",
+                        constructor.span,
+                    ));
 
                     return self.build_constructor_hir_function(
                         constructor,
@@ -541,28 +520,24 @@ impl<'a> Analyzer<'a> {
                         params,
                         scope,
                         HirBlock {
-                            statements: vec![HirStmt::Return {
-                                value: None,
-                            }],
-                        }
+                            statements: vec![HirStmt::Return { value: None }],
+                        },
                     );
                 }
             };
 
-            base_call = Some(
-                HirStmt::Expr(HirExpr {
-                    kind: HirExprKind::ConstructorCall {
-                        constructor: base_constructor_id,
-                        arguments: vec![HirExpr {
-                            kind: HirExprKind::Local(self_local),
-                            ty: Type::Struct(owner),
-                            span: constructor.span,
-                        }],
-                    },
-                    ty: Type::Void,
-                    span: constructor.span,
-                })
-            );
+            base_call = Some(HirStmt::Expr(HirExpr {
+                kind: HirExprKind::ConstructorCall {
+                    constructor: base_constructor_id,
+                    arguments: vec![HirExpr {
+                        kind: HirExprKind::Local(self_local),
+                        ty: Type::Struct(owner),
+                        span: constructor.span,
+                    }],
+                },
+                ty: Type::Void,
+                span: constructor.span,
+            }));
         }
 
         let body = match self.analyze_block(&constructor.body, &mut scope, &Type::Void, 0) {
@@ -571,9 +546,7 @@ impl<'a> Analyzer<'a> {
                     body.statements.insert(0, base_call);
                 }
 
-                body.statements.push(HirStmt::Return {
-                    value: None,
-                });
+                body.statements.push(HirStmt::Return { value: None });
 
                 body
             }
@@ -587,9 +560,7 @@ impl<'a> Analyzer<'a> {
                     statements.push(base_call);
                 }
 
-                statements.push(HirStmt::Return {
-                    value: None,
-                });
+                statements.push(HirStmt::Return { value: None });
 
                 HirBlock { statements }
             }
@@ -605,12 +576,12 @@ impl<'a> Analyzer<'a> {
         owner: StructId,
         params: Vec<HirParam>,
         scope: Scope,
-        body: HirBlock
+        body: HirBlock,
     ) -> HirFunction {
         let locals = scope
             .locals()
             .iter()
-            .filter(|(id, _, _, _)| { !params.iter().any(|param| param.local == *id) })
+            .filter(|(id, _, _, _)| !params.iter().any(|param| param.local == *id))
             .map(|(id, name, ty, _)| HirLocal {
                 id: *id,
                 name: name.clone(),
@@ -636,7 +607,7 @@ impl<'a> Analyzer<'a> {
     fn analyze_function(
         &mut self,
         function: &FunctionDecl,
-        function_id: FunctionId
+        function_id: FunctionId,
     ) -> HirFunction {
         let symbol = self.symbols.function_symbol(function_id).clone();
 
@@ -693,7 +664,7 @@ impl<'a> Analyzer<'a> {
         let locals = scope
             .locals()
             .iter()
-            .filter(|(id, _, _, _)| { !params.iter().any(|param| param.local == *id) })
+            .filter(|(id, _, _, _)| !params.iter().any(|param| param.local == *id))
             .map(|(id, name, ty, _)| HirLocal {
                 id: *id,
                 name: name.clone(),
@@ -719,7 +690,7 @@ impl<'a> Analyzer<'a> {
         match field.visibility {
             Visibility::Public => true,
 
-            Visibility::Private => { self.current_owner == Some(field.owner) }
+            Visibility::Private => self.current_owner == Some(field.owner),
 
             Visibility::Protected => {
                 let Some(current_owner) = self.current_owner else {
@@ -754,10 +725,12 @@ impl<'a> Analyzer<'a> {
         statement: &Stmt,
         scope: &mut Scope,
         return_type: &Type,
-        loop_depth: usize
+        loop_depth: usize,
     ) -> Result<HirBlock, Vec<CompilerError>> {
         let Stmt::Block { statements, .. } = statement else {
-            return Err(vec![CompilerError::internal("internal error: expected block statement")]);
+            return Err(vec![CompilerError::internal(
+                "internal error: expected block statement",
+            )]);
         };
 
         scope.push_scope();
@@ -795,10 +768,14 @@ impl<'a> Analyzer<'a> {
         statement: &Stmt,
         scope: &mut Scope,
         return_type: &Type,
-        loop_depth: usize
+        loop_depth: usize,
     ) -> Result<HirStmt, Vec<CompilerError>> {
         match statement {
-            Stmt::Assign { target, value, span } => {
+            Stmt::Assign {
+                target,
+                value,
+                span,
+            } => {
                 let value = self.analyze_expr(value, scope);
 
                 match target {
@@ -807,114 +784,83 @@ impl<'a> Analyzer<'a> {
                             Some(local) => local,
 
                             None => {
-                                return Err(
-                                    vec![self.error_at(format!("unknown target '{}'", name), *span)]
-                                );
+                                return Err(vec![
+                                    self.error_at(format!("unknown target '{}'", name), *span),
+                                ]);
                             }
                         };
 
                         if !scope.is_mutable(local) {
-                            return Err(
-                                vec![
-                                    self.error_at(
-                                        format!("cannot assign to immutable variable '{}'", name),
-                                        *span
-                                    )
-                                ]
-                            );
+                            return Err(vec![self.error_at(
+                                format!("cannot assign to immutable variable '{}'", name),
+                                *span,
+                            )]);
                         }
 
                         let expected = match scope.type_of(local) {
                             Some(ty) => ty.clone(),
 
                             None => {
-                                return Err(
-                                    vec![
-                                        self.error_at(
-                                            "internal error: missing type for local",
-                                            *span
-                                        )
-                                    ]
-                                );
+                                return Err(vec![
+                                    self.error_at("internal error: missing type for local", *span),
+                                ]);
                             }
                         };
 
                         if value.ty != expected {
-                            return Err(
-                                vec![
-                                    self.error_at(
-                                        format!(
-                                            "cannot assign {:?} to target '{}' of type {:?}",
-                                            value.ty,
-                                            name,
-                                            expected
-                                        ),
-                                        *span
-                                    )
-                                ]
-                            );
+                            return Err(vec![self.error_at(
+                                format!(
+                                    "cannot assign {:?} to target '{}' of type {:?}",
+                                    value.ty, name, expected
+                                ),
+                                *span,
+                            )]);
                         }
 
-                        Ok(HirStmt::Assign {
-                            local,
-                            value,
-                        })
+                        Ok(HirStmt::Assign { local, value })
                     }
 
-                    Expr::Member { receiver, name, span: field_span } => {
+                    Expr::Member {
+                        receiver,
+                        name,
+                        span: field_span,
+                    } => {
                         let receiver = self.analyze_expr(receiver, scope);
 
                         let struct_id = match receiver.ty {
                             Type::Struct(struct_id) => struct_id,
 
                             other => {
-                                return Err(
-                                    vec![
-                                        self.error_at(
-                                            format!(
-                                                "cannot assign field '{}' on value of type {:?}",
-                                                name,
-                                                other
-                                            ),
-                                            *field_span
-                                        )
-                                    ]
-                                );
+                                return Err(vec![self.error_at(
+                                    format!(
+                                        "cannot assign field '{}' on value of type {:?}",
+                                        name, other
+                                    ),
+                                    *field_span,
+                                )]);
                             }
                         };
 
-                        let Some((field_index, field)) = self.symbols.find_field(
-                            struct_id,
-                            name
-                        ) else {
-                            return Err(
-                                vec![
-                                    self.error_at(
-                                        format!(
-                                            "struct '{}' has no field '{}'",
-                                            self.symbols.struct_symbol(struct_id).name,
-                                            name
-                                        ),
-                                        *field_span
-                                    )
-                                ]
-                            );
+                        let Some((field_index, field)) = self.symbols.find_field(struct_id, name)
+                        else {
+                            return Err(vec![self.error_at(
+                                format!(
+                                    "struct '{}' has no field '{}'",
+                                    self.symbols.struct_symbol(struct_id).name,
+                                    name
+                                ),
+                                *field_span,
+                            )]);
                         };
 
                         if value.ty != field.ty {
-                            return Err(
-                                vec![
-                                    self.error_at(
-                                        format!(
-                                            "cannot assign {:?} to field '{}' of type {:?}",
-                                            value.ty,
-                                            name,
-                                            field.ty
-                                        ),
-                                        *span
-                                    )
-                                ]
-                            );
+                            return Err(vec![self.error_at(
+                                format!(
+                                    "cannot assign {:?} to field '{}' of type {:?}",
+                                    value.ty, name, field.ty
+                                ),
+                                *span,
+                            )]);
                         }
 
                         Ok(HirStmt::AssignField {
@@ -925,49 +871,40 @@ impl<'a> Analyzer<'a> {
                         })
                     }
 
-                    _ => { Err(vec![self.error_at("invalid assignment target", *span)]) }
+                    _ => Err(vec![self.error_at("invalid assignment target", *span)]),
                 }
             }
 
-            Stmt::Block { .. } =>
-                Err(
-                    vec![
-                        CompilerError::internal("internal error: unexpected nested block statement")
-                    ]
-                ),
+            Stmt::Block { .. } => Err(vec![CompilerError::internal(
+                "internal error: unexpected nested block statement",
+            )]),
 
-            Stmt::Let { name, ty, value, span } => {
+            Stmt::Let {
+                name,
+                ty,
+                value,
+                span,
+            } => {
                 let declared_type = match self.resolve_type(ty, *span) {
                     Some(ty) => ty,
 
                     None => {
-                        return Err(
-                            vec![
-                                self.error_at(
-                                    "cannot determine type of variable declaration",
-                                    *span
-                                )
-                            ]
-                        );
+                        return Err(vec![
+                            self.error_at("cannot determine type of variable declaration", *span),
+                        ]);
                     }
                 };
 
                 let value = self.analyze_expr(value, scope);
 
                 if value.ty != declared_type {
-                    return Err(
-                        vec![
-                            self.error_at(
-                                format!(
-                                    "cannot initialize variable '{}' of type {:?} with value of type {:?}",
-                                    name,
-                                    declared_type,
-                                    value.ty
-                                ),
-                                *span
-                            )
-                        ]
-                    );
+                    return Err(vec![self.error_at(
+                        format!(
+                            "cannot initialize variable '{}' of type {:?} with value of type {:?}",
+                            name, declared_type, value.ty
+                        ),
+                        *span,
+                    )]);
                 }
 
                 let local = match scope.declare(name.clone(), declared_type, true) {
@@ -981,61 +918,39 @@ impl<'a> Analyzer<'a> {
                 Ok(HirStmt::Let { local, value })
             }
 
-            Stmt::Return { value, span } => {
-                match (return_type, value) {
-                    (Type::Void, None) => { Ok(HirStmt::Return { value: None }) }
+            Stmt::Return { value, span } => match (return_type, value) {
+                (Type::Void, None) => Ok(HirStmt::Return { value: None }),
 
-                    (Type::Void, Some(expression)) => {
-                        let value = self.analyze_expr(expression, scope);
+                (Type::Void, Some(expression)) => {
+                    let value = self.analyze_expr(expression, scope);
 
-                        Err(
-                            vec![
-                                self.error_at(
-                                    format!(
-                                        "void function cannot return a value of type {:?}",
-                                        value.ty
-                                    ),
-                                    *span
-                                )
-                            ]
-                        )
-                    }
-
-                    (expected, None) => {
-                        Err(
-                            vec![
-                                self.error_at(
-                                    format!("function must return a value of type {:?}", expected),
-                                    *span
-                                )
-                            ]
-                        )
-                    }
-
-                    (expected, Some(expression)) => {
-                        let value = self.analyze_expr(expression, scope);
-
-                        if value.ty != *expected {
-                            return Err(
-                                vec![
-                                    self.error_at(
-                                        format!(
-                                            "cannot return value of type {:?} from function returning {:?}",
-                                            value.ty,
-                                            expected
-                                        ),
-                                        *span
-                                    )
-                                ]
-                            );
-                        }
-
-                        Ok(HirStmt::Return {
-                            value: Some(value),
-                        })
-                    }
+                    Err(vec![self.error_at(
+                        format!("void function cannot return a value of type {:?}", value.ty),
+                        *span,
+                    )])
                 }
-            }
+
+                (expected, None) => Err(vec![self.error_at(
+                    format!("function must return a value of type {:?}", expected),
+                    *span,
+                )]),
+
+                (expected, Some(expression)) => {
+                    let value = self.analyze_expr(expression, scope);
+
+                    if value.ty != *expected {
+                        return Err(vec![self.error_at(
+                            format!(
+                                "cannot return value of type {:?} from function returning {:?}",
+                                value.ty, expected
+                            ),
+                            *span,
+                        )]);
+                    }
+
+                    Ok(HirStmt::Return { value: Some(value) })
+                }
+            },
 
             Stmt::Expr { expr, .. } => {
                 let expr = self.analyze_expr(expr, scope);
@@ -1043,32 +958,34 @@ impl<'a> Analyzer<'a> {
                 Ok(HirStmt::Expr(expr))
             }
 
-            Stmt::If { condition, then_block, else_block, span } => {
+            Stmt::If {
+                condition,
+                then_block,
+                else_block,
+                span,
+            } => {
                 let condition = self.analyze_expr(condition, scope);
 
                 if condition.ty != Type::Bool {
-                    return Err(
-                        vec![
-                            self.error_at(
-                                format!("if condition must be bool, found {:?}", condition.ty),
-                                *span
-                            )
-                        ]
-                    );
+                    return Err(vec![self.error_at(
+                        format!("if condition must be bool, found {:?}", condition.ty),
+                        *span,
+                    )]);
                 }
 
-                let then_block = match
-                    self.analyze_block(then_block, scope, return_type, loop_depth)
-                {
-                    Ok(block) => block,
+                let then_block =
+                    match self.analyze_block(then_block, scope, return_type, loop_depth) {
+                        Ok(block) => block,
 
-                    Err(errors) => {
-                        return Err(errors);
-                    }
-                };
+                        Err(errors) => {
+                            return Err(errors);
+                        }
+                    };
 
                 let else_block = match else_block {
-                    Some(block) => Some(self.analyze_block(block, scope, return_type, loop_depth)?),
+                    Some(block) => {
+                        Some(self.analyze_block(block, scope, return_type, loop_depth)?)
+                    }
 
                     None => None,
                 };
@@ -1080,31 +997,30 @@ impl<'a> Analyzer<'a> {
                 })
             }
 
-            Stmt::While { condition, body, span } => {
+            Stmt::While {
+                condition,
+                body,
+                span,
+            } => {
                 let condition = self.analyze_expr(condition, scope);
 
                 if condition.ty != Type::Bool {
-                    return Err(
-                        vec![
-                            self.error_at(
-                                format!("while condition must be bool, found {:?}", condition.ty),
-                                *span
-                            )
-                        ]
-                    );
+                    return Err(vec![self.error_at(
+                        format!("while condition must be bool, found {:?}", condition.ty),
+                        *span,
+                    )]);
                 }
 
                 let body = self.analyze_block(body, scope, return_type, loop_depth + 1)?;
 
-                Ok(HirStmt::While {
-                    condition,
-                    body,
-                })
+                Ok(HirStmt::While { condition, body })
             }
 
             Stmt::Break { span } => {
                 if loop_depth == 0 {
-                    return Err(vec![self.error_at("'break' is only valid inside a loop", *span)]);
+                    return Err(vec![
+                        self.error_at("'break' is only valid inside a loop", *span),
+                    ]);
                 }
 
                 Ok(HirStmt::Break)
@@ -1112,46 +1028,40 @@ impl<'a> Analyzer<'a> {
 
             Stmt::Continue { span } => {
                 if loop_depth == 0 {
-                    return Err(
-                        vec![self.error_at("'continue' is only valid inside a loop", *span)]
-                    );
+                    return Err(vec![
+                        self.error_at("'continue' is only valid inside a loop", *span),
+                    ]);
                 }
 
                 Ok(HirStmt::Continue)
             }
 
-            Stmt::Const { name, ty, value, span } => {
+            Stmt::Const {
+                name,
+                ty,
+                value,
+                span,
+            } => {
                 let declared_type = match self.resolve_type(ty, *span) {
                     Some(ty) => ty,
 
                     None => {
-                        return Err(
-                            vec![
-                                self.error_at(
-                                    "cannot determine type of variable declaration",
-                                    *span
-                                )
-                            ]
-                        );
+                        return Err(vec![
+                            self.error_at("cannot determine type of variable declaration", *span),
+                        ]);
                     }
                 };
 
                 let value = self.analyze_expr(value, scope);
 
                 if value.ty != declared_type {
-                    return Err(
-                        vec![
-                            self.error_at(
-                                format!(
-                                    "cannot initialize variable '{}' of type {:?} with value of type {:?}",
-                                    name,
-                                    declared_type,
-                                    value.ty
-                                ),
-                                *span
-                            )
-                        ]
-                    );
+                    return Err(vec![self.error_at(
+                        format!(
+                            "cannot initialize variable '{}' of type {:?} with value of type {:?}",
+                            name, declared_type, value.ty
+                        ),
+                        *span,
+                    )]);
                 }
 
                 let local = match scope.declare(name.clone(), declared_type, false) {
@@ -1164,7 +1074,11 @@ impl<'a> Analyzer<'a> {
 
                 Ok(HirStmt::Const { local, value })
             }
-            Stmt::New { name, arguments, span } => todo!(),
+            Stmt::New {
+                name,
+                arguments,
+                span,
+            } => todo!(),
         }
     }
 
@@ -1174,64 +1088,63 @@ impl<'a> Analyzer<'a> {
 
     fn analyze_expr(&mut self, expression: &Expr, scope: &Scope) -> HirExpr {
         match expression {
-            Expr::Integer { value, span } =>
-                HirExpr {
-                    kind: HirExprKind::Integer(*value),
-                    ty: Type::Int,
-                    span: *span,
-                },
+            Expr::Integer { value, span } => HirExpr {
+                kind: HirExprKind::Integer(*value),
+                ty: Type::Int,
+                span: *span,
+            },
 
-            Expr::String { value, span } =>
-                HirExpr {
-                    kind: HirExprKind::String(value.clone()),
-                    ty: Type::String,
-                    span: *span,
-                },
+            Expr::String { value, span } => HirExpr {
+                kind: HirExprKind::String(value.clone()),
+                ty: Type::String,
+                span: *span,
+            },
 
-            Expr::Bool { value, span } =>
-                HirExpr {
-                    kind: HirExprKind::Bool(*value),
-                    ty: Type::Bool,
-                    span: *span,
-                },
+            Expr::Bool { value, span } => HirExpr {
+                kind: HirExprKind::Bool(*value),
+                ty: Type::Bool,
+                span: *span,
+            },
 
-            Expr::Identifier { name, span } => {
-                match scope.lookup(name) {
-                    Some(local) => {
-                        let ty = match scope.type_of(local) {
-                            Some(ty) => ty.clone(),
+            Expr::Identifier { name, span } => match scope.lookup(name) {
+                Some(local) => {
+                    let ty = match scope.type_of(local) {
+                        Some(ty) => ty.clone(),
 
-                            None => {
-                                self.errors.push(
-                                    self.error_at("internal error: missing type for local", *span)
-                                );
+                        None => {
+                            self.errors.push(
+                                self.error_at("internal error: missing type for local", *span),
+                            );
 
-                                Type::Int
-                            }
-                        };
-
-                        HirExpr {
-                            kind: HirExprKind::Local(local),
-                            ty,
-                            span: *span,
+                            Type::Int
                         }
-                    }
+                    };
 
-                    None => {
-                        self.errors.push(
-                            self.error_at(format!("unknown variable '{}'", name), *span)
-                        );
-
-                        HirExpr {
-                            kind: HirExprKind::Integer(0),
-                            ty: Type::Int,
-                            span: *span,
-                        }
+                    HirExpr {
+                        kind: HirExprKind::Local(local),
+                        ty,
+                        span: *span,
                     }
                 }
-            }
 
-            Expr::Binary { op, left, right, span } => {
+                None => {
+                    self.errors
+                        .push(self.error_at(format!("unknown variable '{}'", name), *span));
+
+                    HirExpr {
+                        kind: HirExprKind::Integer(0),
+                        ty: Type::Int,
+                        span: *span,
+                    }
+                }
+            },
+
+            Expr::Binary {
+                op,
+                left,
+                right,
+                span,
+            } => {
                 let left = self.analyze_expr(left, scope);
                 let right = self.analyze_expr(right, scope);
 
@@ -1277,16 +1190,13 @@ impl<'a> Analyzer<'a> {
 
                     BinaryOp::Equal => {
                         if left.ty != right.ty {
-                            self.errors.push(
-                                self.error_at(
-                                    format!(
-                                        "cannot compare values of different types: {:?} and {:?}",
-                                        left.ty,
-                                        right.ty
-                                    ),
-                                    *span
-                                )
-                            );
+                            self.errors.push(self.error_at(
+                                format!(
+                                    "cannot compare values of different types: {:?} and {:?}",
+                                    left.ty, right.ty
+                                ),
+                                *span,
+                            ));
 
                             return HirExpr {
                                 kind: HirExprKind::Bool(false),
@@ -1308,21 +1218,23 @@ impl<'a> Analyzer<'a> {
                 }
             }
 
-            Expr::Call { receiver, name, arguments, span } => {
+            Expr::Call {
+                receiver,
+                name,
+                arguments,
+                span,
+            } => {
                 if let Some(receiver_expression) = receiver {
                     let analyzed_receiver = self.analyze_expr(receiver_expression, scope);
 
                     let Type::Struct(struct_id) = analyzed_receiver.ty.clone() else {
-                        self.errors.push(
-                            self.error_at(
-                                format!(
-                                    "cannot call method '{}' on value of type {:?}",
-                                    name,
-                                    analyzed_receiver.ty
-                                ),
-                                *span
-                            )
-                        );
+                        self.errors.push(self.error_at(
+                            format!(
+                                "cannot call method '{}' on value of type {:?}",
+                                name, analyzed_receiver.ty
+                            ),
+                            *span,
+                        ));
 
                         return HirExpr {
                             kind: HirExprKind::Integer(0),
@@ -1332,16 +1244,14 @@ impl<'a> Analyzer<'a> {
                     };
 
                     let Some(method_id) = self.symbols.find_method(struct_id, name) else {
-                        self.errors.push(
-                            self.error_at(
-                                format!(
-                                    "struct '{}' has no method '{}'",
-                                    self.symbols.struct_symbol(struct_id).name,
-                                    name
-                                ),
-                                *span
-                            )
-                        );
+                        self.errors.push(self.error_at(
+                            format!(
+                                "struct '{}' has no method '{}'",
+                                self.symbols.struct_symbol(struct_id).name,
+                                name
+                            ),
+                            *span,
+                        ));
 
                         return HirExpr {
                             kind: HirExprKind::Integer(0),
@@ -1353,18 +1263,16 @@ impl<'a> Analyzer<'a> {
                     let method = self.symbols.function_symbol(method_id).clone();
 
                     if arguments.len() != method.parameters.len() {
-                        self.errors.push(
-                            self.error_at(
-                                format!(
-                                    "method '{}.{}' expects {} argument(s), found {}",
-                                    self.symbols.struct_symbol(struct_id).name,
-                                    name,
-                                    method.parameters.len(),
-                                    arguments.len()
-                                ),
-                                *span
-                            )
-                        );
+                        self.errors.push(self.error_at(
+                            format!(
+                                "method '{}.{}' expects {} argument(s), found {}",
+                                self.symbols.struct_symbol(struct_id).name,
+                                name,
+                                method.parameters.len(),
+                                arguments.len()
+                            ),
+                            *span,
+                        ));
                     }
 
                     let mut analyzed_arguments = Vec::with_capacity(arguments.len() + 1);
@@ -1406,9 +1314,8 @@ impl<'a> Analyzer<'a> {
                     }
                 } else {
                     let Some(function_id) = self.symbols.find_function(name) else {
-                        self.errors.push(
-                            self.error_at(format!("unknown function '{}'", name), *span)
-                        );
+                        self.errors
+                            .push(self.error_at(format!("unknown function '{}'", name), *span));
 
                         return HirExpr {
                             kind: HirExprKind::Integer(0),
@@ -1420,17 +1327,15 @@ impl<'a> Analyzer<'a> {
                     let function = self.symbols.function_symbol(function_id).clone();
 
                     if arguments.len() != function.parameters.len() {
-                        self.errors.push(
-                            self.error_at(
-                                format!(
-                                    "function '{}' expects {} argument(s), found {}",
-                                    name,
-                                    function.parameters.len(),
-                                    arguments.len()
-                                ),
-                                *span
-                            )
-                        );
+                        self.errors.push(self.error_at(
+                            format!(
+                                "function '{}' expects {} argument(s), found {}",
+                                name,
+                                function.parameters.len(),
+                                arguments.len()
+                            ),
+                            *span,
+                        ));
                     }
 
                     let mut analyzed_arguments = Vec::with_capacity(arguments.len());
@@ -1440,18 +1345,16 @@ impl<'a> Analyzer<'a> {
 
                         if let Some(parameter) = function.parameters.get(index) {
                             if value.ty != parameter.ty {
-                                self.errors.push(
-                                    self.error_at(
-                                        format!(
-                                            "argument {} of '{}' has type {:?}, expected {:?}",
-                                            index + 1,
-                                            name,
-                                            value.ty,
-                                            parameter.ty
-                                        ),
-                                        value.span
-                                    )
-                                );
+                                self.errors.push(self.error_at(
+                                    format!(
+                                        "argument {} of '{}' has type {:?}, expected {:?}",
+                                        index + 1,
+                                        name,
+                                        value.ty,
+                                        parameter.ty
+                                    ),
+                                    value.span,
+                                ));
                             }
                         }
 
@@ -1468,14 +1371,18 @@ impl<'a> Analyzer<'a> {
                     }
                 }
             }
-            Expr::Member { receiver, name, span } => {
+            Expr::Member {
+                receiver,
+                name,
+                span,
+            } => {
                 let analyzed_receiver = self.analyze_expr(receiver, scope);
 
                 let Type::Struct(struct_id) = analyzed_receiver.ty else {
                     let receiver_type = analyzed_receiver.ty.clone();
 
                     self.errors.push(
-                        self.error_at(format!("type {:?} has no fields", receiver_type), *span)
+                        self.error_at(format!("type {:?} has no fields", receiver_type), *span),
                     );
 
                     return HirExpr {
@@ -1488,12 +1395,10 @@ impl<'a> Analyzer<'a> {
                 let Some((field_index, field)) = self.symbols.find_field(struct_id, name) else {
                     let struct_name = self.symbols.struct_symbol(struct_id).name.clone();
 
-                    self.errors.push(
-                        self.error_at(
-                            format!("struct '{}' has no field '{}'", struct_name, name),
-                            *span
-                        )
-                    );
+                    self.errors.push(self.error_at(
+                        format!("struct '{}' has no field '{}'", struct_name, name),
+                        *span,
+                    ));
 
                     return HirExpr {
                         kind: HirExprKind::Integer(0),
@@ -1511,17 +1416,13 @@ impl<'a> Analyzer<'a> {
 
                     let struct_name = self.symbols.struct_symbol(struct_id).name.clone();
 
-                    self.errors.push(
-                        self.error_at(
-                            format!(
-                                "cannot access {} field '{}' of struct '{}'",
-                                visibility,
-                                name,
-                                struct_name
-                            ),
-                            *span
-                        )
-                    );
+                    self.errors.push(self.error_at(
+                        format!(
+                            "cannot access {} field '{}' of struct '{}'",
+                            visibility, name, struct_name
+                        ),
+                        *span,
+                    ));
 
                     return HirExpr {
                         kind: HirExprKind::Integer(0),
@@ -1541,9 +1442,14 @@ impl<'a> Analyzer<'a> {
                 }
             }
 
-            Expr::New { name, arguments, span } => {
+            Expr::New {
+                name,
+                arguments,
+                span,
+            } => {
                 let Some(struct_id) = self.symbols.find_struct(name) else {
-                    self.errors.push(self.error_at(format!("unknown struct '{}'", name), *span));
+                    self.errors
+                        .push(self.error_at(format!("unknown struct '{}'", name), *span));
 
                     return HirExpr {
                         kind: HirExprKind::Integer(0),
@@ -1554,16 +1460,14 @@ impl<'a> Analyzer<'a> {
 
                 let Some(constructor_id) = self.symbols.find_constructor(struct_id) else {
                     if !arguments.is_empty() {
-                        self.errors.push(
-                            self.error_at(
-                                format!(
-                                    "struct '{}' has no constructor accepting {} argument(s)",
-                                    name,
-                                    arguments.len()
-                                ),
-                                *span
-                            )
-                        );
+                        self.errors.push(self.error_at(
+                            format!(
+                                "struct '{}' has no constructor accepting {} argument(s)",
+                                name,
+                                arguments.len()
+                            ),
+                            *span,
+                        ));
                     }
 
                     return HirExpr {
@@ -1580,17 +1484,15 @@ impl<'a> Analyzer<'a> {
                 let constructor = self.symbols.constructor_symbol(constructor_id).clone();
 
                 if arguments.len() != constructor.parameters.len() {
-                    self.errors.push(
-                        self.error_at(
-                            format!(
-                                "constructor '{}' expects {} argument(s), found {}",
-                                name,
-                                constructor.parameters.len(),
-                                arguments.len()
-                            ),
-                            *span
-                        )
-                    );
+                    self.errors.push(self.error_at(
+                        format!(
+                            "constructor '{}' expects {} argument(s), found {}",
+                            name,
+                            constructor.parameters.len(),
+                            arguments.len()
+                        ),
+                        *span,
+                    ));
                 }
 
                 let mut analyzed_arguments = Vec::with_capacity(arguments.len());
@@ -1600,18 +1502,16 @@ impl<'a> Analyzer<'a> {
 
                     if let Some(parameter) = constructor.parameters.get(index) {
                         if value.ty != parameter.ty {
-                            self.errors.push(
-                                self.error_at(
-                                    format!(
-                                        "argument {} of constructor '{}' has type {:?}, expected {:?}",
-                                        index + 1,
-                                        name,
-                                        value.ty,
-                                        parameter.ty
-                                    ),
-                                    value.span
-                                )
-                            );
+                            self.errors.push(self.error_at(
+                                format!(
+                                    "argument {} of constructor '{}' has type {:?}, expected {:?}",
+                                    index + 1,
+                                    name,
+                                    value.ty,
+                                    parameter.ty
+                                ),
+                                value.span,
+                            ));
                         }
                     }
 
@@ -1642,27 +1542,22 @@ impl<'a> Analyzer<'a> {
             };
 
             let Some(base_id) = self.symbols.find_struct(base_name) else {
-                self.errors.push(
-                    self.error_at(
-                        format!(
-                            "struct '{}' extends unknown struct '{}'",
-                            structure.name,
-                            base_name
-                        ),
-                        structure.span
-                    )
-                );
+                self.errors.push(self.error_at(
+                    format!(
+                        "struct '{}' extends unknown struct '{}'",
+                        structure.name, base_name
+                    ),
+                    structure.span,
+                ));
 
                 continue;
             };
 
             if struct_id == base_id {
-                self.errors.push(
-                    self.error_at(
-                        format!("struct '{}' cannot extend itself", structure.name),
-                        structure.span
-                    )
-                );
+                self.errors.push(self.error_at(
+                    format!("struct '{}' cannot extend itself", structure.name),
+                    structure.span,
+                ));
 
                 continue;
             }
@@ -1676,12 +1571,10 @@ impl<'a> Analyzer<'a> {
             };
 
             if self.has_inheritance_cycle(struct_id) {
-                self.errors.push(
-                    self.error_at(
-                        format!("inheritance cycle involving struct '{}'", structure.name),
-                        structure.span
-                    )
-                );
+                self.errors.push(self.error_at(
+                    format!("inheritance cycle involving struct '{}'", structure.name),
+                    structure.span,
+                ));
             }
         }
     }
@@ -1706,7 +1599,7 @@ impl<'a> Analyzer<'a> {
 mod tests {
     use super::*;
     use crate::compiler::source::Span;
-    use crate::parser::ast::{ BinaryOp, Expr, FunctionDecl, Program, Stmt, TypeName };
+    use crate::parser::ast::{BinaryOp, Expr, FunctionDecl, Program, Stmt, TypeName};
 
     fn span() -> Span {
         Span::new(0, 1)
@@ -1778,7 +1671,7 @@ mod tests {
         base: Option<&str>,
         fields: Vec<FieldDecl>,
         methods: Vec<FunctionDecl>,
-        constructors: Vec<ConstructorDecl>
+        constructors: Vec<ConstructorDecl>,
     ) -> StructDecl {
         StructDecl {
             name: name.to_string(),
@@ -1802,7 +1695,7 @@ mod tests {
     fn constructor(
         params: Vec<Param>,
         base_arguments: Vec<Expr>,
-        statements: Vec<Stmt>
+        statements: Vec<Stmt>,
     ) -> ConstructorDecl {
         ConstructorDecl {
             params,
@@ -1841,10 +1734,7 @@ mod tests {
     }
 
     fn struct_program(structs: Vec<StructDecl>, functions: Vec<FunctionDecl>) -> Program {
-        Program {
-            structs,
-            functions,
-        }
+        Program { structs, functions }
     }
 
     #[test]
@@ -1856,7 +1746,7 @@ mod tests {
             None,
             vec![field("age", TypeName::Int)],
             Vec::new(),
-            Vec::new()
+            Vec::new(),
         );
 
         let get_age = function(
@@ -1872,8 +1762,8 @@ mod tests {
                 Stmt::Return {
                     value: Some(member(identifier("person"), "age")),
                     span: span(),
-                }
-            ]
+                },
+            ],
         );
 
         let result = analyze(struct_program(vec![person], vec![get_age]), source);
@@ -1881,7 +1771,8 @@ mod tests {
         assert!(result.is_ok(), "expected successful analysis: {result:?}");
 
         let hir = result.unwrap();
-        let function = hir.functions
+        let function = hir
+            .functions
             .iter()
             .find(|function| function.name == "get_age")
             .unwrap();
@@ -1891,7 +1782,11 @@ mod tests {
                 assert_eq!(value.ty, Type::Int);
 
                 match &value.kind {
-                    HirExprKind::Field { struct_id: _, field, .. } => {
+                    HirExprKind::Field {
+                        struct_id: _,
+                        field,
+                        ..
+                    } => {
                         assert_eq!(*field, 0);
                     }
 
@@ -1912,7 +1807,7 @@ mod tests {
             None,
             vec![field("age", TypeName::Int)],
             Vec::new(),
-            Vec::new()
+            Vec::new(),
         );
 
         let update_age = function(
@@ -1929,8 +1824,8 @@ mod tests {
                     target: member(identifier("person"), "age"),
                     value: int(42),
                     span: span(),
-                }
-            ]
+                },
+            ],
         );
 
         let result = analyze(struct_program(vec![person], vec![update_age]), source);
@@ -1938,13 +1833,19 @@ mod tests {
         assert!(result.is_ok(), "expected successful analysis: {result:?}");
 
         let hir = result.unwrap();
-        let function = hir.functions
+        let function = hir
+            .functions
             .iter()
             .find(|function| function.name == "update_age")
             .unwrap();
 
         match &function.body.statements[1] {
-            HirStmt::AssignField { struct_id: _, field, value, .. } => {
+            HirStmt::AssignField {
+                struct_id: _,
+                field,
+                value,
+                ..
+            } => {
                 assert_eq!(*field, 0);
                 assert_eq!(value.ty, Type::Int);
             }
@@ -1962,7 +1863,7 @@ mod tests {
             None,
             vec![field("age", TypeName::Int)],
             Vec::new(),
-            Vec::new()
+            Vec::new(),
         );
 
         let update = function(
@@ -1979,8 +1880,8 @@ mod tests {
                     target: member(identifier("person"), "missing"),
                     value: int(42),
                     span: span(),
-                }
-            ]
+                },
+            ],
         );
 
         let result = analyze(struct_program(vec![person], vec![update]), source);
@@ -1990,7 +1891,9 @@ mod tests {
         let errors = result.unwrap_err();
 
         assert!(
-            errors.iter().any(|error| error.message.contains("has no field")),
+            errors
+                .iter()
+                .any(|error| error.message.contains("has no field")),
             "expected unknown-field diagnostic, got {errors:?}"
         );
     }
@@ -2004,7 +1907,7 @@ mod tests {
             None,
             vec![field("age", TypeName::Int)],
             Vec::new(),
-            Vec::new()
+            Vec::new(),
         );
 
         let update = function(
@@ -2021,8 +1924,8 @@ mod tests {
                     target: member(identifier("person"), "age"),
                     value: string("wrong"),
                     span: span(),
-                }
-            ]
+                },
+            ],
         );
 
         let result = analyze(struct_program(vec![person], vec![update]), source);
@@ -2032,7 +1935,9 @@ mod tests {
         let errors = result.unwrap_err();
 
         assert!(
-            errors.iter().any(|error| error.message.contains("cannot assign")),
+            errors
+                .iter()
+                .any(|error| error.message.contains("cannot assign")),
             "expected field-assignment diagnostic, got {errors:?}"
         );
     }
@@ -2046,7 +1951,7 @@ mod tests {
             None,
             vec![field("age", TypeName::Int)],
             Vec::new(),
-            Vec::new()
+            Vec::new(),
         );
 
         let employee = struct_decl(
@@ -2054,7 +1959,7 @@ mod tests {
             Some("Person"),
             vec![field("employee_id", TypeName::Int)],
             Vec::new(),
-            Vec::new()
+            Vec::new(),
         );
 
         let get_age = function(
@@ -2070,13 +1975,19 @@ mod tests {
                 Stmt::Return {
                     value: Some(member(identifier("employee"), "age")),
                     span: span(),
-                }
-            ]
+                },
+            ],
         );
 
-        let result = analyze(struct_program(vec![person, employee], vec![get_age]), source);
+        let result = analyze(
+            struct_program(vec![person, employee], vec![get_age]),
+            source,
+        );
 
-        assert!(result.is_ok(), "expected inherited field access to succeed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "expected inherited field access to succeed: {result:?}"
+        );
     }
 
     #[test]
@@ -2088,7 +1999,7 @@ mod tests {
             None,
             vec![field("age", TypeName::Int)],
             Vec::new(),
-            Vec::new()
+            Vec::new(),
         );
 
         let main = function(
@@ -2097,16 +2008,20 @@ mod tests {
             vec![Stmt::Return {
                 value: Some(new_expr("Person", Vec::new())),
                 span: span(),
-            }]
+            }],
         );
 
         let result = analyze(struct_program(vec![person], vec![main]), source);
 
-        assert!(result.is_ok(), "expected default constructor to work: {result:?}");
+        assert!(
+            result.is_ok(),
+            "expected default constructor to work: {result:?}"
+        );
 
         let hir = result.unwrap();
 
-        let constructor = hir.functions
+        let constructor = hir
+            .functions
             .iter()
             .find(|function| function.constructor_id.is_some())
             .unwrap();
@@ -2125,7 +2040,11 @@ mod tests {
             None,
             Vec::new(),
             Vec::new(),
-            vec![constructor(vec![param("age", TypeName::Int)], Vec::new(), Vec::new())]
+            vec![constructor(
+                vec![param("age", TypeName::Int)],
+                Vec::new(),
+                Vec::new(),
+            )],
         );
 
         let main = function(
@@ -2134,7 +2053,7 @@ mod tests {
             vec![Stmt::Return {
                 value: Some(new_expr("Person", Vec::new())),
                 span: span(),
-            }]
+            }],
         );
 
         let result = analyze(struct_program(vec![person], vec![main]), source);
@@ -2144,7 +2063,9 @@ mod tests {
         let errors = result.unwrap_err();
 
         assert!(
-            errors.iter().any(|error| error.message.contains("expects 1 argument")),
+            errors
+                .iter()
+                .any(|error| error.message.contains("expects 1 argument")),
             "expected constructor-argument-count diagnostic, got {errors:?}"
         );
     }
@@ -2158,7 +2079,11 @@ mod tests {
             None,
             Vec::new(),
             Vec::new(),
-            vec![constructor(vec![param("age", TypeName::Int)], Vec::new(), Vec::new())]
+            vec![constructor(
+                vec![param("age", TypeName::Int)],
+                Vec::new(),
+                Vec::new(),
+            )],
         );
 
         let main = function(
@@ -2167,7 +2092,7 @@ mod tests {
             vec![Stmt::Return {
                 value: Some(new_expr("Person", vec![string("wrong")])),
                 span: span(),
-            }]
+            }],
         );
 
         let result = analyze(struct_program(vec![person], vec![main]), source);
@@ -2177,7 +2102,9 @@ mod tests {
         let errors = result.unwrap_err();
 
         assert!(
-            errors.iter().any(|error| error.message.contains("argument 1 of constructor")),
+            errors
+                .iter()
+                .any(|error| error.message.contains("argument 1 of constructor")),
             "expected constructor-type diagnostic, got {errors:?}"
         );
     }
@@ -2191,7 +2118,11 @@ mod tests {
             None,
             vec![field("age", TypeName::Int)],
             Vec::new(),
-            vec![constructor(vec![param("age", TypeName::Int)], Vec::new(), Vec::new())]
+            vec![constructor(
+                vec![param("age", TypeName::Int)],
+                Vec::new(),
+                Vec::new(),
+            )],
         );
 
         let employee = struct_decl(
@@ -2199,17 +2130,18 @@ mod tests {
             Some("Person"),
             vec![field("employee_id", TypeName::Int)],
             Vec::new(),
-            vec![
-                constructor(
-                    vec![param("age", TypeName::Int), param("employee_id", TypeName::Int)],
-                    vec![identifier("age")],
-                    vec![Stmt::Assign {
-                        target: member(identifier("this"), "employee_id"),
-                        value: identifier("employee_id"),
-                        span: span(),
-                    }]
-                )
-            ]
+            vec![constructor(
+                vec![
+                    param("age", TypeName::Int),
+                    param("employee_id", TypeName::Int),
+                ],
+                vec![identifier("age")],
+                vec![Stmt::Assign {
+                    target: member(identifier("this"), "employee_id"),
+                    value: identifier("employee_id"),
+                    span: span(),
+                }],
+            )],
         );
 
         let main = function(
@@ -2218,38 +2150,47 @@ mod tests {
             vec![Stmt::Return {
                 value: Some(new_expr("Employee", vec![int(30), int(42)])),
                 span: span(),
-            }]
+            }],
         );
 
         let result = analyze(struct_program(vec![person, employee], vec![main]), source);
 
-        assert!(result.is_ok(), "expected explicit base constructor to work: {result:?}");
+        assert!(
+            result.is_ok(),
+            "expected explicit base constructor to work: {result:?}"
+        );
 
         let hir = result.unwrap();
 
-        let employee_constructor = hir.functions
+        let employee_constructor = hir
+            .functions
             .iter()
             .find(|function| {
-                function.owner ==
-                    Some(
+                function.owner
+                    == Some(
                         hir.structs
                             .iter()
                             .find(|structure| structure.name == "Employee")
-                            .unwrap().id
+                            .unwrap()
+                            .id,
                     )
             })
             .unwrap();
 
         assert!(
-            employee_constructor.body.statements.iter().any(|statement| {
-                matches!(
-                    statement,
-                    HirStmt::Expr(HirExpr {
-                        kind: HirExprKind::ConstructorCall { .. },
-                        ..
-                    })
-                )
-            }),
+            employee_constructor
+                .body
+                .statements
+                .iter()
+                .any(|statement| {
+                    matches!(
+                        statement,
+                        HirStmt::Expr(HirExpr {
+                            kind: HirExprKind::ConstructorCall { .. },
+                            ..
+                        })
+                    )
+                }),
             "expected constructor to contain a base constructor call"
         );
     }
@@ -2260,7 +2201,13 @@ mod tests {
 
         let person = struct_decl("Person", None, Vec::new(), Vec::new(), Vec::new());
 
-        let employee = struct_decl("Employee", Some("Person"), Vec::new(), Vec::new(), Vec::new());
+        let employee = struct_decl(
+            "Employee",
+            Some("Person"),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
 
         let main = function(
             "main",
@@ -2268,35 +2215,45 @@ mod tests {
             vec![Stmt::Return {
                 value: Some(new_expr("Employee", Vec::new())),
                 span: span(),
-            }]
+            }],
         );
 
         let result = analyze(struct_program(vec![person, employee], vec![main]), source);
 
-        assert!(result.is_ok(), "expected implicit base constructor call: {result:?}");
+        assert!(
+            result.is_ok(),
+            "expected implicit base constructor call: {result:?}"
+        );
 
         let hir = result.unwrap();
 
-        let employee_id = hir.structs
+        let employee_id = hir
+            .structs
             .iter()
             .find(|structure| structure.name == "Employee")
-            .unwrap().id;
+            .unwrap()
+            .id;
 
-        let employee_constructor = hir.functions
+        let employee_constructor = hir
+            .functions
             .iter()
             .find(|function| function.owner == Some(employee_id))
             .unwrap();
 
         assert!(
-            employee_constructor.body.statements.iter().any(|statement| {
-                matches!(
-                    statement,
-                    HirStmt::Expr(HirExpr {
-                        kind: HirExprKind::ConstructorCall { .. },
-                        ..
-                    })
-                )
-            }),
+            employee_constructor
+                .body
+                .statements
+                .iter()
+                .any(|statement| {
+                    matches!(
+                        statement,
+                        HirStmt::Expr(HirExpr {
+                            kind: HirExprKind::ConstructorCall { .. },
+                            ..
+                        })
+                    )
+                }),
             "expected implicit base constructor call"
         );
     }
@@ -2310,10 +2267,20 @@ mod tests {
             None,
             Vec::new(),
             Vec::new(),
-            vec![constructor(vec![param("age", TypeName::Int)], Vec::new(), Vec::new())]
+            vec![constructor(
+                vec![param("age", TypeName::Int)],
+                Vec::new(),
+                Vec::new(),
+            )],
         );
 
-        let employee = struct_decl("Employee", Some("Person"), Vec::new(), Vec::new(), Vec::new());
+        let employee = struct_decl(
+            "Employee",
+            Some("Person"),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
 
         let main = function(
             "main",
@@ -2321,7 +2288,7 @@ mod tests {
             vec![Stmt::Return {
                 value: Some(new_expr("Employee", Vec::new())),
                 span: span(),
-            }]
+            }],
         );
 
         let result = analyze(struct_program(vec![person, employee], vec![main]), source);
@@ -2331,12 +2298,10 @@ mod tests {
         let errors = result.unwrap_err();
 
         assert!(
-            errors
-                .iter()
-                .any(|error| {
-                    error.message.contains("requires 1 argument") &&
-                        error.message.contains("implicit base constructor")
-                }),
+            errors.iter().any(|error| {
+                error.message.contains("requires 1 argument")
+                    && error.message.contains("implicit base constructor")
+            }),
             "expected implicit-base-constructor diagnostic, got {errors:?}"
         );
     }

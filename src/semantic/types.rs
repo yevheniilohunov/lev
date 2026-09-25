@@ -13,9 +13,7 @@ pub enum Type {
 }
 
 impl Type {
-    pub fn from_ast_builtin(
-        ty: &TypeName,
-    ) -> Option<Self> {
+    pub fn from_ast_builtin(ty: &TypeName) -> Option<Self> {
         match ty {
             TypeName::Int => Some(Self::Int),
 

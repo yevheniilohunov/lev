@@ -1,6 +1,10 @@
 use crate::{
     compiler::error::CompilerError,
-    semantic::{ hir::*, symbols::{ ConstructorId, FunctionId, StructId }, types::Type },
+    semantic::{
+        hir::*,
+        symbols::{ConstructorId, FunctionId, StructId},
+        types::Type,
+    },
 };
 
 use super::ir::*;
@@ -25,7 +29,8 @@ pub fn lower_to_ir(program: HirProgram) -> Result<IrProgram, Vec<CompilerError>>
      * Constructors don't have FunctionIds yet; they have ConstructorIds.
      * Assign runtime FunctionIds to constructors after the normal functions.
      */
-    let mut next_function_id = program.functions
+    let mut next_function_id = program
+        .functions
         .iter()
         .filter_map(|function| function.id)
         .map(|id| id.0)
@@ -58,24 +63,27 @@ pub fn lower_to_ir(program: HirProgram) -> Result<IrProgram, Vec<CompilerError>>
             continue;
         };
 
-        functions.push(lower_function(&program, function, &constructor_functions, function_id));
+        functions.push(lower_function(
+            &program,
+            function,
+            &constructor_functions,
+            function_id,
+        ));
     }
 
-    Ok(IrProgram {
-        structs,
-        functions,
-    })
+    Ok(IrProgram { structs, functions })
 }
 
 fn flatten_struct_fields(
     structs: &[HirStruct],
-    struct_id: StructId
+    struct_id: StructId,
 ) -> Result<Vec<IrField>, Vec<CompilerError>> {
-    let structure = structs
-        .get(struct_id.0)
-        .ok_or_else(|| {
-            vec![CompilerError::internal(format!("unknown struct id {:?}", struct_id))]
-        })?;
+    let structure = structs.get(struct_id.0).ok_or_else(|| {
+        vec![CompilerError::internal(format!(
+            "unknown struct id {:?}",
+            struct_id
+        ))]
+    })?;
 
     let mut fields = Vec::new();
 
@@ -83,12 +91,10 @@ fn flatten_struct_fields(
         fields.extend(flatten_struct_fields(structs, base)?);
     }
 
-    fields.extend(
-        structure.fields.iter().map(|field| IrField {
-            name: field.name.clone(),
-            ty: IrType::from(&field.ty),
-        })
-    );
+    fields.extend(structure.fields.iter().map(|field| IrField {
+        name: field.name.clone(),
+        ty: IrType::from(&field.ty),
+    }));
 
     Ok(fields)
 }
@@ -100,42 +106,35 @@ fn append_struct_fields(structs: &[HirStruct], struct_id: StructId, fields: &mut
         append_struct_fields(structs, base, fields);
     }
 
-    fields.extend(
-        structure.fields.iter().map(|field| IrField {
-            name: field.name.clone(),
-            ty: IrType::from(&field.ty),
-        })
-    );
+    fields.extend(structure.fields.iter().map(|field| IrField {
+        name: field.name.clone(),
+        ty: IrType::from(&field.ty),
+    }));
 }
 
 fn physical_field_index(
     structs: &[HirStruct],
     receiver_struct: StructId,
     declaring_struct: StructId,
-    field_index: usize
+    field_index: usize,
 ) -> Result<usize, CompilerError> {
     if receiver_struct == declaring_struct {
-        let structure = structs
-            .get(receiver_struct.0)
-            .ok_or_else(|| {
-                CompilerError::internal(format!("unknown receiver struct {:?}", receiver_struct))
-            })?;
+        let structure = structs.get(receiver_struct.0).ok_or_else(|| {
+            CompilerError::internal(format!("unknown receiver struct {:?}", receiver_struct))
+        })?;
 
         return Ok(inherited_field_count(structs, structure)? + field_index);
     }
 
-    let structure = structs
-        .get(receiver_struct.0)
-        .ok_or_else(|| {
-            CompilerError::internal(format!("unknown receiver struct {:?}", receiver_struct))
-        })?;
+    let structure = structs.get(receiver_struct.0).ok_or_else(|| {
+        CompilerError::internal(format!("unknown receiver struct {:?}", receiver_struct))
+    })?;
 
     let Some(base) = structure.base else {
-        return Err(
-            CompilerError::internal(
-                format!("struct {:?} does not inherit from {:?}", receiver_struct, declaring_struct)
-            )
-        );
+        return Err(CompilerError::internal(format!(
+            "struct {:?} does not inherit from {:?}",
+            receiver_struct, declaring_struct
+        )));
     };
 
     physical_field_index(structs, base, declaring_struct, field_index)
@@ -143,7 +142,7 @@ fn physical_field_index(
 
 fn inherited_field_count(
     structs: &[HirStruct],
-    structure: &HirStruct
+    structure: &HirStruct,
 ) -> Result<usize, CompilerError> {
     let Some(base) = structure.base else {
         return Ok(0);
@@ -151,7 +150,7 @@ fn inherited_field_count(
 
     let base_structure = structs
         .get(base.0)
-        .ok_or_else(|| { CompilerError::internal(format!("unknown base struct {:?}", base)) })?;
+        .ok_or_else(|| CompilerError::internal(format!("unknown base struct {:?}", base)))?;
 
     Ok(inherited_field_count(structs, base_structure)? + base_structure.fields.len())
 }
@@ -160,7 +159,7 @@ fn field_offset(
     structs: &[HirStruct],
     receiver_struct: StructId,
     declaring_struct: StructId,
-    field_index: usize
+    field_index: usize,
 ) -> usize {
     if receiver_struct == declaring_struct {
         return field_index;
@@ -172,17 +171,18 @@ fn field_offset(
         panic!("field declaring struct is not in receiver inheritance chain");
     };
 
-    field_offset(structs, base, declaring_struct, field_index) +
-        structure.fields.iter().count().min(0)
+    field_offset(structs, base, declaring_struct, field_index)
+        + structure.fields.iter().count().min(0)
 }
 
 fn lower_function(
     program: &HirProgram,
     function: &HirFunction,
     constructor_functions: &[(ConstructorId, FunctionId)],
-    function_id: FunctionId
+    function_id: FunctionId,
 ) -> IrFunction {
-    let parameters = function.params
+    let parameters = function
+        .params
         .iter()
         .map(|param| IrLocal {
             id: param.local,
@@ -191,7 +191,8 @@ fn lower_function(
         })
         .collect();
 
-    let locals = function.locals
+    let locals = function
+        .locals
         .iter()
         .map(|local| IrLocal {
             id: local.id,
@@ -243,7 +244,7 @@ struct LoopTargets {
 impl<'a> FunctionBuilder<'a> {
     fn new(
         program: &'a HirProgram,
-        constructor_functions: &'a [(ConstructorId, FunctionId)]
+        constructor_functions: &'a [(ConstructorId, FunctionId)],
     ) -> Self {
         Self {
             program,
@@ -293,7 +294,10 @@ impl<'a> FunctionBuilder<'a> {
     }
 
     fn is_terminated(&self) -> bool {
-        !matches!(self.blocks[self.current_block.0].terminator, Terminator::Unreachable)
+        !matches!(
+            self.blocks[self.current_block.0].terminator,
+            Terminator::Unreachable
+        )
     }
 
     fn emit(&mut self, instruction: IrInstruction) {
@@ -367,7 +371,11 @@ impl<'a> FunctionBuilder<'a> {
                 let _ = self.lower_expr(expr);
             }
 
-            HirStmt::If { condition, then_block, else_block } => {
+            HirStmt::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
                 self.lower_if(condition, then_block, else_block.as_ref());
             }
 
@@ -386,7 +394,12 @@ impl<'a> FunctionBuilder<'a> {
                     self.terminate(Terminator::Jump(targets.condition));
                 }
             }
-            HirStmt::AssignField { receiver, struct_id, field, value } => {
+            HirStmt::AssignField {
+                receiver,
+                struct_id,
+                field,
+                value,
+            } => {
                 let receiver_struct = match receiver.ty {
                     Type::Struct(id) => id,
                     _ => {
@@ -402,9 +415,12 @@ impl<'a> FunctionBuilder<'a> {
                     return;
                 };
 
-                let physical_field = match
-                    physical_field_index(&self.program.structs, receiver_struct, *struct_id, *field)
-                {
+                let physical_field = match physical_field_index(
+                    &self.program.structs,
+                    receiver_struct,
+                    *struct_id,
+                    *field,
+                ) {
                     Ok(index) => index,
                     Err(_) => {
                         return;
@@ -447,7 +463,7 @@ impl<'a> FunctionBuilder<'a> {
         &mut self,
         condition: &HirExpr,
         then_block: &HirBlock,
-        else_block: Option<&HirBlock>
+        else_block: Option<&HirBlock>,
     ) {
         let Some(condition) = self.lower_expr(condition) else {
             return;
@@ -592,7 +608,10 @@ impl<'a> FunctionBuilder<'a> {
                 Some(destination)
             }
 
-            HirExprKind::Call { function, arguments } => {
+            HirExprKind::Call {
+                function,
+                arguments,
+            } => {
                 let mut values = Vec::with_capacity(arguments.len());
 
                 for argument in arguments {
@@ -613,7 +632,11 @@ impl<'a> FunctionBuilder<'a> {
                 destination
             }
 
-            HirExprKind::Field { receiver, struct_id, field } => {
+            HirExprKind::Field {
+                receiver,
+                struct_id,
+                field,
+            } => {
                 let receiver_value = self.lower_expr(receiver)?;
 
                 let receiver_struct = match receiver.ty {
@@ -623,9 +646,12 @@ impl<'a> FunctionBuilder<'a> {
                     }
                 };
 
-                let physical_field = match
-                    physical_field_index(&self.program.structs, receiver_struct, *struct_id, *field)
-                {
+                let physical_field = match physical_field_index(
+                    &self.program.structs,
+                    receiver_struct,
+                    *struct_id,
+                    *field,
+                ) {
                     Ok(index) => index,
                     Err(error) => {
                         // lower_expr currently cannot return CompilerError,
@@ -647,7 +673,11 @@ impl<'a> FunctionBuilder<'a> {
                 Some(destination)
             }
 
-            HirExprKind::StructInit { struct_id, constructor, arguments } => {
+            HirExprKind::StructInit {
+                struct_id,
+                constructor,
+                arguments,
+            } => {
                 let destination = self.new_value();
 
                 self.emit(IrInstruction::AllocStruct {
@@ -685,7 +715,10 @@ impl<'a> FunctionBuilder<'a> {
                 Some(destination)
             }
 
-            HirExprKind::ConstructorCall { constructor, arguments } => {
+            HirExprKind::ConstructorCall {
+                constructor,
+                arguments,
+            } => {
                 let function = match self.constructor_function_id(*constructor) {
                     Some(function) => function,
                     None => {

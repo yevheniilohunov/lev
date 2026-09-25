@@ -47,7 +47,7 @@ fn main() -> miette::Result<()> {
             Ok(())
         }
         Err(errors) => {
-             for error in errors {
+            for error in errors {
                 eprintln!("codegen error: {:?}", Report::new(error));
             }
 

@@ -83,13 +83,26 @@ impl<'a> Validator<'a> {
 
     fn validate_ssa_form(&mut self, function: &IrFunction) {
         for block in &function.blocks {
+            let mut saw_non_phi = false;
+
             for instruction in &block.instructions {
                 match instruction {
+                    IrInstruction::Phi { .. } => {
+                        if saw_non_phi {
+                            self.error(format!(
+                            "function '{}': phi in block {} appears after a non-phi instruction",
+                            function.name,
+                            block.id.0
+                        ));
+                        }
+                    }
+
                     IrInstruction::LoadLocal { .. } => {
                         self.error(format!(
                             "function '{}': LoadLocal remains after SSA construction in block {}",
                             function.name, block.id.0
                         ));
+                        saw_non_phi = true;
                     }
 
                     IrInstruction::StoreLocal { .. } => {
@@ -97,10 +110,56 @@ impl<'a> Validator<'a> {
                             "function '{}': StoreLocal remains after SSA construction in block {}",
                             function.name, block.id.0
                         ));
+                        saw_non_phi = true;
                     }
 
-                    _ => {}
+                    _ => {
+                        saw_non_phi = true;
+                    }
                 }
+            }
+        }
+    }
+
+    fn validate_phi_node(
+        &mut self,
+        function: &IrFunction,
+        block: &BasicBlock,
+        local: LocalId,
+        destination: ValueId,
+        sources: &[(BlockId, ValueId)],
+        definitions: &HashMap<ValueId, ValueDefinition>,
+    ) {
+        let Some(local_ty) = self.local_type(function, local) else {
+            return;
+        };
+
+        let Some(destination_def) = definitions.get(&destination) else {
+            return;
+        };
+
+        if destination_def.ty != local_ty {
+            self.error(format!(
+                "function '{}': phi destination %{} has type {:?}, but local {} has type {:?}",
+                function.name, destination.0, destination_def.ty, local.0, local_ty
+            ));
+        }
+
+        for (_, value) in sources {
+            let Some(value_def) = definitions.get(value) else {
+                continue;
+            };
+
+            if value_def.ty != local_ty {
+                self.error(format!(
+                "function '{}': phi in block {} for local {} receives value %{} of type {:?}, expected {:?}",
+                function.name,
+                block.id.0,
+                local.0,
+                value.0,
+                value_def.ty,
+                local_ty
+            ));
             }
         }
     }
@@ -771,6 +830,47 @@ impl<'a> Validator<'a> {
             );
         }
 
+        for block in &function.blocks {
+            if !dominance.reachable.contains(&block.id) {
+                continue;
+            }
+
+            for instruction in &block.instructions {
+                let IrInstruction::Phi {
+                    destination,
+                    local,
+                    sources,
+                } = instruction
+                else {
+                    continue;
+                };
+
+                self.validate_phi_node(
+                    function,
+                    block,
+                    *local,
+                    *destination,
+                    sources,
+                    &definitions,
+                );
+            }
+        }
+
+        for block in &function.blocks {
+            if block.id != function.entry {
+                for instruction in &block.instructions {
+                    if let IrInstruction::Parameter { local, .. } = instruction {
+                        self.error(format!(
+                    "function '{}': parameter local {} is defined outside the entry block {}",
+                    function.name,
+                    local.0,
+                    function.entry.0
+                ));
+                    }
+                }
+            }
+        }
+
         self.validate_returns(function, &definitions);
     }
 
@@ -782,6 +882,14 @@ impl<'a> Validator<'a> {
         definitions: &HashMap<ValueId, ValueDefinition>,
         dominance: &DominanceInfo,
     ) {
+        if sources.is_empty() {
+            self.error(format!(
+                "function '{}': phi in block {} has no incoming values",
+                function.name, phi_block.0
+            ));
+            return;
+        }
+
         let predecessors = function.predecessors(phi_block);
 
         let mut incoming_blocks = HashSet::new();
@@ -1163,4 +1271,1561 @@ fn compute_dominance_frontier(
     }
 
     frontier
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn local(id: usize, name: &str, ty: IrType) -> IrLocal {
+        IrLocal {
+            id: LocalId(id),
+            name: name.to_string(),
+            ty,
+        }
+    }
+
+    fn block(id: usize, instructions: Vec<IrInstruction>, terminator: Terminator) -> BasicBlock {
+        BasicBlock {
+            id: BlockId(id),
+            instructions,
+            terminator,
+        }
+    }
+
+    fn function(
+        id: usize,
+        name: &str,
+        parameters: Vec<IrLocal>,
+        locals: Vec<IrLocal>,
+        return_type: IrType,
+        blocks: Vec<BasicBlock>,
+    ) -> IrFunction {
+        IrFunction {
+            id: Some(FunctionId(id)),
+            name: name.to_string(),
+            owner: None,
+            parameters,
+            locals,
+            return_type,
+            entry: BlockId(0),
+            blocks,
+        }
+    }
+
+    fn program(functions: Vec<IrFunction>) -> IrProgram {
+        IrProgram {
+            structs: Vec::new(),
+            functions,
+        }
+    }
+
+    fn assert_error(result: Result<(), Vec<CompilerError>>, expected: &str) {
+        let errors = result.expect_err("expected validation to fail");
+
+        assert!(
+            errors.iter().any(|error| error.message.contains(expected)),
+            "expected an error containing {:?}, got:\n{:#?}",
+            expected,
+            errors
+        );
+    }
+
+    fn assert_valid(result: Result<(), Vec<CompilerError>>) {
+        if let Err(errors) = result {
+            panic!("expected valid IR, got:\n{:#?}", errors);
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Basic program/function structure
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn accepts_empty_program() {
+        assert_valid(validate(&program(Vec::new())));
+    }
+
+    #[test]
+    fn accepts_minimal_void_function() {
+        let function = function(
+            0,
+            "test",
+            Vec::new(),
+            Vec::new(),
+            IrType::Void,
+            vec![block(0, Vec::new(), Terminator::Return { value: None })],
+        );
+
+        assert_valid(validate(&program(vec![function])));
+    }
+
+    #[test]
+    fn rejects_invalid_entry_block() {
+        let mut function = function(
+            0,
+            "test",
+            Vec::new(),
+            Vec::new(),
+            IrType::Void,
+            vec![block(0, Vec::new(), Terminator::Return { value: None })],
+        );
+
+        function.entry = BlockId(10);
+
+        assert_error(validate(&program(vec![function])), "invalid entry block 10");
+    }
+
+    #[test]
+    fn rejects_duplicate_function_ids() {
+        let first = function(
+            0,
+            "first",
+            Vec::new(),
+            Vec::new(),
+            IrType::Void,
+            vec![block(0, Vec::new(), Terminator::Return { value: None })],
+        );
+
+        let second = function(
+            0,
+            "second",
+            Vec::new(),
+            Vec::new(),
+            IrType::Void,
+            vec![block(0, Vec::new(), Terminator::Return { value: None })],
+        );
+
+        assert_error(
+            validate(&program(vec![first, second])),
+            "duplicate function id #0",
+        );
+    }
+
+    #[test]
+    fn rejects_block_id_that_does_not_match_position() {
+        let function = function(
+            0,
+            "test",
+            Vec::new(),
+            Vec::new(),
+            IrType::Void,
+            vec![
+                block(0, Vec::new(), Terminator::Jump(BlockId(2))),
+                block(2, Vec::new(), Terminator::Return { value: None }),
+            ],
+        );
+
+        assert_error(
+            validate(&program(vec![function])),
+            "block id 2 does not match position 1",
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_block_ids() {
+        let function = function(
+            0,
+            "test",
+            Vec::new(),
+            Vec::new(),
+            IrType::Void,
+            vec![
+                block(0, Vec::new(), Terminator::Return { value: None }),
+                block(0, Vec::new(), Terminator::Return { value: None }),
+            ],
+        );
+
+        assert_error(validate(&program(vec![function])), "duplicate block id 0");
+    }
+
+    #[test]
+    fn rejects_invalid_jump_target() {
+        let function = function(
+            0,
+            "test",
+            Vec::new(),
+            Vec::new(),
+            IrType::Void,
+            vec![block(0, Vec::new(), Terminator::Jump(BlockId(99)))],
+        );
+
+        assert_error(
+            validate(&program(vec![function])),
+            "block 0 references invalid block 99",
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_branch_targets() {
+        let function = function(
+            0,
+            "test",
+            vec![local(0, "condition", IrType::Bool)],
+            Vec::new(),
+            IrType::Void,
+            vec![block(
+                0,
+                vec![IrInstruction::Parameter {
+                    destination: ValueId(0),
+                    local: LocalId(0),
+                }],
+                Terminator::Branch {
+                    condition: ValueId(0),
+                    then_block: BlockId(1),
+                    else_block: BlockId(99),
+                },
+            )],
+        );
+
+        assert_error(
+            validate(&program(vec![function])),
+            "block 0 references invalid block 99",
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Locals
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn rejects_duplicate_parameter_and_local_id() {
+        let function = function(
+            0,
+            "test",
+            vec![local(0, "x", IrType::Int)],
+            vec![local(0, "y", IrType::Int)],
+            IrType::Void,
+            vec![block(0, Vec::new(), Terminator::Return { value: None })],
+        );
+
+        assert_error(validate(&program(vec![function])), "duplicate local id 0");
+    }
+
+    #[test]
+    fn rejects_unknown_local() {
+        let function = function(
+            0,
+            "test",
+            Vec::new(),
+            Vec::new(),
+            IrType::Void,
+            vec![block(
+                0,
+                vec![IrInstruction::LoadLocal {
+                    destination: ValueId(0),
+                    local: LocalId(42),
+                }],
+                Terminator::Return { value: None },
+            )],
+        );
+
+        assert_error(validate(&program(vec![function])), "unknown local 42");
+    }
+
+    // ---------------------------------------------------------------------
+    // Calls
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn rejects_unknown_call_target() {
+        let function = function(
+            0,
+            "test",
+            Vec::new(),
+            Vec::new(),
+            IrType::Void,
+            vec![block(
+                0,
+                vec![IrInstruction::Call {
+                    destination: None,
+                    function: FunctionId(99),
+                    arguments: Vec::new(),
+                }],
+                Terminator::Return { value: None },
+            )],
+        );
+
+        assert_error(
+            validate(&program(vec![function])),
+            "call references unknown function #99",
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_call_argument_count() {
+        let callee = function(
+            0,
+            "callee",
+            vec![local(0, "x", IrType::Int), local(1, "y", IrType::Bool)],
+            Vec::new(),
+            IrType::Void,
+            vec![block(
+                0,
+                vec![
+                    IrInstruction::Parameter {
+                        destination: ValueId(0),
+                        local: LocalId(0),
+                    },
+                    IrInstruction::Parameter {
+                        destination: ValueId(1),
+                        local: LocalId(1),
+                    },
+                ],
+                Terminator::Return { value: None },
+            )],
+        );
+
+        let caller = function(
+            1,
+            "caller",
+            Vec::new(),
+            Vec::new(),
+            IrType::Void,
+            vec![block(
+                0,
+                vec![
+                    IrInstruction::ConstInt {
+                        destination: ValueId(0),
+                        value: 1,
+                    },
+                    IrInstruction::Call {
+                        destination: None,
+                        function: FunctionId(0),
+                        arguments: vec![ValueId(0)],
+                    },
+                ],
+                Terminator::Return { value: None },
+            )],
+        );
+
+        assert_error(
+            validate(&program(vec![callee, caller])),
+            "call to 'callee' expects 2 arguments but got 1",
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_call_argument_type() {
+        let callee = function(
+            0,
+            "callee",
+            vec![local(0, "x", IrType::Int)],
+            Vec::new(),
+            IrType::Void,
+            vec![block(
+                0,
+                vec![IrInstruction::Parameter {
+                    destination: ValueId(0),
+                    local: LocalId(0),
+                }],
+                Terminator::Return { value: None },
+            )],
+        );
+
+        let caller = function(
+            1,
+            "caller",
+            Vec::new(),
+            Vec::new(),
+            IrType::Void,
+            vec![block(
+                0,
+                vec![
+                    IrInstruction::ConstBool {
+                        destination: ValueId(0),
+                        value: true,
+                    },
+                    IrInstruction::Call {
+                        destination: None,
+                        function: FunctionId(0),
+                        arguments: vec![ValueId(0)],
+                    },
+                ],
+                Terminator::Return { value: None },
+            )],
+        );
+
+        assert_error(
+            validate(&program(vec![callee, caller])),
+            "argument 0 to 'callee' has type Bool, expected Int",
+        );
+    }
+
+    #[test]
+    fn accepts_inheritance_assignability_for_call_arguments() {
+        let base = IrStruct {
+            id: StructId(0),
+            name: "Base".to_string(),
+            base: None,
+            fields: Vec::new(),
+        };
+
+        let derived = IrStruct {
+            id: StructId(1),
+            name: "Derived".to_string(),
+            base: Some(StructId(0)),
+            fields: Vec::new(),
+        };
+
+        let callee = function(
+            0,
+            "accept_base",
+            vec![local(0, "value", IrType::Struct(StructId(0)))],
+            Vec::new(),
+            IrType::Void,
+            vec![block(
+                0,
+                vec![IrInstruction::Parameter {
+                    destination: ValueId(0),
+                    local: LocalId(0),
+                }],
+                Terminator::Return { value: None },
+            )],
+        );
+
+        let caller = function(
+            1,
+            "caller",
+            Vec::new(),
+            Vec::new(),
+            IrType::Void,
+            vec![block(
+                0,
+                vec![
+                    IrInstruction::AllocStruct {
+                        destination: ValueId(0),
+                        struct_id: StructId(1),
+                    },
+                    IrInstruction::Call {
+                        destination: None,
+                        function: FunctionId(0),
+                        arguments: vec![ValueId(0)],
+                    },
+                ],
+                Terminator::Return { value: None },
+            )],
+        );
+
+        let mut program = program(vec![callee, caller]);
+        program.structs = vec![base, derived];
+
+        assert_valid(validate(&program));
+    }
+
+    #[test]
+    fn rejects_destination_for_void_call() {
+        let callee = function(
+            0,
+            "callee",
+            Vec::new(),
+            Vec::new(),
+            IrType::Void,
+            vec![block(0, Vec::new(), Terminator::Return { value: None })],
+        );
+
+        let caller = function(
+            1,
+            "caller",
+            Vec::new(),
+            Vec::new(),
+            IrType::Void,
+            vec![block(
+                0,
+                vec![IrInstruction::Call {
+                    destination: Some(ValueId(0)),
+                    function: FunctionId(0),
+                    arguments: Vec::new(),
+                }],
+                Terminator::Return { value: None },
+            )],
+        );
+
+        assert_error(
+            validate(&program(vec![callee, caller])),
+            "call to void function 'callee' has a destination",
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Returns
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn rejects_value_return_from_void_function() {
+        let function = function(
+            0,
+            "test",
+            Vec::new(),
+            Vec::new(),
+            IrType::Void,
+            vec![block(
+                0,
+                vec![IrInstruction::ConstInt {
+                    destination: ValueId(0),
+                    value: 42,
+                }],
+                Terminator::Return {
+                    value: Some(ValueId(0)),
+                },
+            )],
+        );
+
+        assert_error(
+            validate(&program(vec![function])),
+            "void function returns a value",
+        );
+    }
+
+    #[test]
+    fn rejects_empty_return_from_non_void_function() {
+        let function = function(
+            0,
+            "test",
+            Vec::new(),
+            Vec::new(),
+            IrType::Int,
+            vec![block(0, Vec::new(), Terminator::Return { value: None })],
+        );
+
+        assert_error(
+            validate(&program(vec![function])),
+            "non-void function has empty return",
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_return_type() {
+        let function = function(
+            0,
+            "test",
+            Vec::new(),
+            Vec::new(),
+            IrType::Int,
+            vec![block(
+                0,
+                vec![IrInstruction::ConstBool {
+                    destination: ValueId(0),
+                    value: true,
+                }],
+                Terminator::Return {
+                    value: Some(ValueId(0)),
+                },
+            )],
+        );
+
+        assert_error(
+            validate(&program(vec![function])),
+            "return value has type Bool, expected Int",
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Values / definitions / dominance
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn rejects_undefined_value_use() {
+        let function = function(
+            0,
+            "test",
+            Vec::new(),
+            Vec::new(),
+            IrType::Int,
+            vec![block(
+                0,
+                Vec::new(),
+                Terminator::Return {
+                    value: Some(ValueId(99)),
+                },
+            )],
+        );
+
+        assert_error(
+            validate(&program(vec![function])),
+            "value %99 is used but never defined",
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_value_definition() {
+        let function = function(
+            0,
+            "test",
+            Vec::new(),
+            Vec::new(),
+            IrType::Int,
+            vec![block(
+                0,
+                vec![
+                    IrInstruction::ConstInt {
+                        destination: ValueId(0),
+                        value: 1,
+                    },
+                    IrInstruction::ConstInt {
+                        destination: ValueId(0),
+                        value: 2,
+                    },
+                ],
+                Terminator::Return {
+                    value: Some(ValueId(0)),
+                },
+            )],
+        );
+
+        assert_error(
+            validate(&program(vec![function])),
+            "value %0 is defined more than once",
+        );
+    }
+
+    #[test]
+    fn rejects_value_used_before_dominating_block() {
+        let function = function(
+            0,
+            "test",
+            vec![local(0, "condition", IrType::Bool)],
+            Vec::new(),
+            IrType::Int,
+            vec![
+                block(
+                    0,
+                    vec![IrInstruction::Parameter {
+                        destination: ValueId(0),
+                        local: LocalId(0),
+                    }],
+                    Terminator::Branch {
+                        condition: ValueId(0),
+                        then_block: BlockId(1),
+                        else_block: BlockId(2),
+                    },
+                ),
+                block(
+                    1,
+                    vec![IrInstruction::ConstInt {
+                        destination: ValueId(1),
+                        value: 42,
+                    }],
+                    Terminator::Jump(BlockId(3)),
+                ),
+                block(2, Vec::new(), Terminator::Jump(BlockId(3))),
+                block(
+                    3,
+                    Vec::new(),
+                    Terminator::Return {
+                        value: Some(ValueId(1)),
+                    },
+                ),
+            ],
+        );
+
+        assert_error(
+            validate(&program(vec![function])),
+            "does not dominate the use",
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Binary instructions
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn accepts_integer_arithmetic() {
+        let function = function(
+            0,
+            "test",
+            Vec::new(),
+            Vec::new(),
+            IrType::Int,
+            vec![block(
+                0,
+                vec![
+                    IrInstruction::ConstInt {
+                        destination: ValueId(0),
+                        value: 1,
+                    },
+                    IrInstruction::ConstInt {
+                        destination: ValueId(1),
+                        value: 2,
+                    },
+                    IrInstruction::Binary {
+                        destination: ValueId(2),
+                        op: IrBinaryOp::Add,
+                        left: ValueId(0),
+                        right: ValueId(1),
+                    },
+                ],
+                Terminator::Return {
+                    value: Some(ValueId(2)),
+                },
+            )],
+        );
+
+        assert_valid(validate(&program(vec![function])));
+    }
+
+    #[test]
+    fn rejects_non_integer_arithmetic() {
+        let function = function(
+            0,
+            "test",
+            Vec::new(),
+            Vec::new(),
+            IrType::Int,
+            vec![block(
+                0,
+                vec![
+                    IrInstruction::ConstBool {
+                        destination: ValueId(0),
+                        value: true,
+                    },
+                    IrInstruction::ConstInt {
+                        destination: ValueId(1),
+                        value: 2,
+                    },
+                    IrInstruction::Binary {
+                        destination: ValueId(2),
+                        op: IrBinaryOp::Add,
+                        left: ValueId(0),
+                        right: ValueId(1),
+                    },
+                ],
+                Terminator::Return {
+                    value: Some(ValueId(2)),
+                },
+            )],
+        );
+
+        assert_error(
+            validate(&program(vec![function])),
+            "binary left operand has type Bool, expected Int",
+        );
+    }
+
+    #[test]
+    fn rejects_equality_with_incompatible_types() {
+        let function = function(
+            0,
+            "test",
+            Vec::new(),
+            Vec::new(),
+            IrType::Bool,
+            vec![block(
+                0,
+                vec![
+                    IrInstruction::ConstInt {
+                        destination: ValueId(0),
+                        value: 1,
+                    },
+                    IrInstruction::ConstBool {
+                        destination: ValueId(1),
+                        value: true,
+                    },
+                    IrInstruction::Binary {
+                        destination: ValueId(2),
+                        op: IrBinaryOp::Equal,
+                        left: ValueId(0),
+                        right: ValueId(1),
+                    },
+                ],
+                Terminator::Return {
+                    value: Some(ValueId(2)),
+                },
+            )],
+        );
+
+        assert_error(
+            validate(&program(vec![function])),
+            "equality operands have incompatible types",
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Struct fields
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn accepts_valid_field_load_and_store() {
+        let structure = IrStruct {
+            id: StructId(0),
+            name: "Point".to_string(),
+            base: None,
+            fields: vec![IrField {
+                name: "x".to_string(),
+                ty: IrType::Int,
+            }],
+        };
+
+        let function = function(
+            0,
+            "test",
+            Vec::new(),
+            Vec::new(),
+            IrType::Int,
+            vec![block(
+                0,
+                vec![
+                    IrInstruction::AllocStruct {
+                        destination: ValueId(0),
+                        struct_id: StructId(0),
+                    },
+                    IrInstruction::ConstInt {
+                        destination: ValueId(1),
+                        value: 10,
+                    },
+                    IrInstruction::StoreField {
+                        receiver: ValueId(0),
+                        field: 0,
+                        value: ValueId(1),
+                    },
+                    IrInstruction::LoadField {
+                        destination: ValueId(2),
+                        receiver: ValueId(0),
+                        field: 0,
+                    },
+                ],
+                Terminator::Return {
+                    value: Some(ValueId(2)),
+                },
+            )],
+        );
+
+        let mut program = program(vec![function]);
+        program.structs.push(structure);
+
+        assert_valid(validate(&program));
+    }
+
+    #[test]
+    fn rejects_load_field_from_non_struct() {
+        let function = function(
+            0,
+            "test",
+            Vec::new(),
+            Vec::new(),
+            IrType::Int,
+            vec![block(
+                0,
+                vec![
+                    IrInstruction::ConstInt {
+                        destination: ValueId(0),
+                        value: 1,
+                    },
+                    IrInstruction::LoadField {
+                        destination: ValueId(1),
+                        receiver: ValueId(0),
+                        field: 0,
+                    },
+                ],
+                Terminator::Return {
+                    value: Some(ValueId(1)),
+                },
+            )],
+        );
+
+        assert_error(
+            validate(&program(vec![function])),
+            "LoadField receiver %0 is not a struct",
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_load_field_index() {
+        let structure = IrStruct {
+            id: StructId(0),
+            name: "Point".to_string(),
+            base: None,
+            fields: vec![],
+        };
+
+        let function = function(
+            0,
+            "test",
+            Vec::new(),
+            Vec::new(),
+            IrType::Int,
+            vec![block(
+                0,
+                vec![
+                    IrInstruction::AllocStruct {
+                        destination: ValueId(0),
+                        struct_id: StructId(0),
+                    },
+                    IrInstruction::LoadField {
+                        destination: ValueId(1),
+                        receiver: ValueId(0),
+                        field: 5,
+                    },
+                ],
+                Terminator::Return {
+                    value: Some(ValueId(1)),
+                },
+            )],
+        );
+
+        let mut program = program(vec![function]);
+        program.structs.push(structure);
+
+        assert_error(validate(&program), "LoadField references invalid field 5");
+    }
+
+    #[test]
+    fn rejects_store_field_type_mismatch() {
+        let structure = IrStruct {
+            id: StructId(0),
+            name: "Point".to_string(),
+            base: None,
+            fields: vec![IrField {
+                name: "x".to_string(),
+                ty: IrType::Int,
+            }],
+        };
+
+        let function = function(
+            0,
+            "test",
+            Vec::new(),
+            Vec::new(),
+            IrType::Void,
+            vec![block(
+                0,
+                vec![
+                    IrInstruction::AllocStruct {
+                        destination: ValueId(0),
+                        struct_id: StructId(0),
+                    },
+                    IrInstruction::ConstBool {
+                        destination: ValueId(1),
+                        value: true,
+                    },
+                    IrInstruction::StoreField {
+                        receiver: ValueId(0),
+                        field: 0,
+                        value: ValueId(1),
+                    },
+                ],
+                Terminator::Return { value: None },
+            )],
+        );
+
+        let mut program = program(vec![function]);
+        program.structs.push(structure);
+
+        assert_error(
+            validate(&program),
+            "StoreField value has type Bool, expected Int",
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // StructCopy
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn rejects_struct_copy_type_mismatch() {
+        let first = IrStruct {
+            id: StructId(0),
+            name: "A".to_string(),
+            base: None,
+            fields: Vec::new(),
+        };
+
+        let second = IrStruct {
+            id: StructId(1),
+            name: "B".to_string(),
+            base: None,
+            fields: Vec::new(),
+        };
+
+        let function = function(
+            0,
+            "test",
+            Vec::new(),
+            Vec::new(),
+            IrType::Struct(StructId(1)),
+            vec![block(
+                0,
+                vec![
+                    IrInstruction::AllocStruct {
+                        destination: ValueId(0),
+                        struct_id: StructId(0),
+                    },
+                    IrInstruction::StructCopy {
+                        destination: ValueId(1),
+                        source: ValueId(0),
+                        struct_id: StructId(1),
+                    },
+                ],
+                Terminator::Return {
+                    value: Some(ValueId(1)),
+                },
+            )],
+        );
+
+        let mut program = program(vec![function]);
+        program.structs = vec![first, second];
+
+        assert_error(
+            validate(&program),
+            "StructCopy source has type Struct(StructId(0)), expected Struct(StructId(1))",
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // SSA form
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn validate_ssa_accepts_phi_before_normal_instructions() {
+        let function = function(
+            0,
+            "test",
+            vec![local(0, "condition", IrType::Bool)],
+            vec![local(1, "x", IrType::Int)],
+            IrType::Int,
+            vec![
+                block(
+                    0,
+                    vec![
+                        IrInstruction::Parameter {
+                            destination: ValueId(0),
+                            local: LocalId(0),
+                        },
+                        IrInstruction::ConstInt {
+                            destination: ValueId(1),
+                            value: 10,
+                        },
+                    ],
+                    Terminator::Branch {
+                        condition: ValueId(0),
+                        then_block: BlockId(1),
+                        else_block: BlockId(2),
+                    },
+                ),
+                block(
+                    1,
+                    vec![IrInstruction::ConstInt {
+                        destination: ValueId(2),
+                        value: 20,
+                    }],
+                    Terminator::Jump(BlockId(3)),
+                ),
+                block(
+                    2,
+                    vec![IrInstruction::ConstInt {
+                        destination: ValueId(3),
+                        value: 30,
+                    }],
+                    Terminator::Jump(BlockId(3)),
+                ),
+                block(
+                    3,
+                    vec![IrInstruction::Phi {
+                        destination: ValueId(4),
+                        local: LocalId(1),
+                        sources: vec![(BlockId(1), ValueId(2)), (BlockId(2), ValueId(3))],
+                    }],
+                    Terminator::Return {
+                        value: Some(ValueId(4)),
+                    },
+                ),
+            ],
+        );
+
+        assert_valid(validate_ssa(&program(vec![function])));
+    }
+
+    #[test]
+    fn validate_ssa_rejects_phi_after_non_phi() {
+        let function = function(
+            0,
+            "test",
+            Vec::new(),
+            vec![local(0, "x", IrType::Int)],
+            IrType::Int,
+            vec![block(
+                0,
+                vec![
+                    IrInstruction::ConstInt {
+                        destination: ValueId(0),
+                        value: 1,
+                    },
+                    IrInstruction::Phi {
+                        destination: ValueId(1),
+                        local: LocalId(0),
+                        sources: vec![(BlockId(0), ValueId(0))],
+                    },
+                ],
+                Terminator::Return {
+                    value: Some(ValueId(1)),
+                },
+            )],
+        );
+
+        assert_error(
+            validate_ssa(&program(vec![function])),
+            "phi in block 0 appears after a non-phi instruction",
+        );
+    }
+
+    #[test]
+    fn validate_ssa_rejects_load_local() {
+        let function = function(
+            0,
+            "test",
+            Vec::new(),
+            vec![local(0, "x", IrType::Int)],
+            IrType::Int,
+            vec![block(
+                0,
+                vec![
+                    IrInstruction::ConstInt {
+                        destination: ValueId(0),
+                        value: 1,
+                    },
+                    IrInstruction::LoadLocal {
+                        destination: ValueId(1),
+                        local: LocalId(0),
+                    },
+                ],
+                Terminator::Return {
+                    value: Some(ValueId(0)),
+                },
+            )],
+        );
+
+        assert_error(
+            validate_ssa(&program(vec![function])),
+            "LoadLocal remains after SSA construction",
+        );
+    }
+
+    #[test]
+    fn validate_ssa_rejects_store_local() {
+        let function = function(
+            0,
+            "test",
+            Vec::new(),
+            vec![local(0, "x", IrType::Int)],
+            IrType::Void,
+            vec![block(
+                0,
+                vec![
+                    IrInstruction::ConstInt {
+                        destination: ValueId(0),
+                        value: 1,
+                    },
+                    IrInstruction::StoreLocal {
+                        local: LocalId(0),
+                        value: ValueId(0),
+                    },
+                ],
+                Terminator::Return { value: None },
+            )],
+        );
+
+        assert_error(
+            validate_ssa(&program(vec![function])),
+            "StoreLocal remains after SSA construction",
+        );
+    }
+
+    #[test]
+    fn validate_ssa_rejects_parameter_outside_entry() {
+        let function = function(
+            0,
+            "test",
+            vec![local(0, "x", IrType::Int)],
+            Vec::new(),
+            IrType::Void,
+            vec![
+                block(0, Vec::new(), Terminator::Jump(BlockId(1))),
+                block(
+                    1,
+                    vec![IrInstruction::Parameter {
+                        destination: ValueId(0),
+                        local: LocalId(0),
+                    }],
+                    Terminator::Return { value: None },
+                ),
+            ],
+        );
+
+        assert_error(
+            validate_ssa(&program(vec![function])),
+            "parameter local 0 is defined outside the entry block 0",
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Phi validation
+    // ---------------------------------------------------------------------
+
+    fn branching_function_with_phi(sources: Vec<(BlockId, ValueId)>) -> IrFunction {
+        function(
+            0,
+            "test",
+            vec![local(0, "condition", IrType::Bool)],
+            vec![local(1, "x", IrType::Int)],
+            IrType::Int,
+            vec![
+                block(
+                    0,
+                    vec![
+                        IrInstruction::Parameter {
+                            destination: ValueId(0),
+                            local: LocalId(0),
+                        },
+                        IrInstruction::ConstInt {
+                            destination: ValueId(1),
+                            value: 0,
+                        },
+                    ],
+                    Terminator::Branch {
+                        condition: ValueId(0),
+                        then_block: BlockId(1),
+                        else_block: BlockId(2),
+                    },
+                ),
+                block(
+                    1,
+                    vec![IrInstruction::ConstInt {
+                        destination: ValueId(2),
+                        value: 1,
+                    }],
+                    Terminator::Jump(BlockId(3)),
+                ),
+                block(
+                    2,
+                    vec![IrInstruction::ConstInt {
+                        destination: ValueId(3),
+                        value: 2,
+                    }],
+                    Terminator::Jump(BlockId(3)),
+                ),
+                block(
+                    3,
+                    vec![IrInstruction::Phi {
+                        destination: ValueId(4),
+                        local: LocalId(1),
+                        sources,
+                    }],
+                    Terminator::Return {
+                        value: Some(ValueId(4)),
+                    },
+                ),
+            ],
+        )
+    }
+
+    #[test]
+    fn validate_ssa_accepts_complete_phi() {
+        let function =
+            branching_function_with_phi(vec![(BlockId(1), ValueId(2)), (BlockId(2), ValueId(3))]);
+
+        assert_valid(validate_ssa(&program(vec![function])));
+    }
+
+    #[test]
+    fn validate_ssa_rejects_empty_phi() {
+        let function = branching_function_with_phi(Vec::new());
+
+        assert_error(
+            validate_ssa(&program(vec![function])),
+            "phi in block 3 has no incoming values",
+        );
+    }
+
+    #[test]
+    fn validate_ssa_rejects_phi_from_non_predecessor() {
+        let function =
+            branching_function_with_phi(vec![(BlockId(1), ValueId(2)), (BlockId(99), ValueId(3))]);
+
+        assert_error(
+            validate_ssa(&program(vec![function])),
+            "incoming edge from non-predecessor block 99",
+        );
+    }
+
+    #[test]
+    fn validate_ssa_rejects_duplicate_phi_predecessor() {
+        let function =
+            branching_function_with_phi(vec![(BlockId(1), ValueId(2)), (BlockId(1), ValueId(2))]);
+
+        assert_error(
+            validate_ssa(&program(vec![function])),
+            "duplicate incoming block 1",
+        );
+    }
+
+    #[test]
+    fn validate_ssa_rejects_missing_phi_predecessor() {
+        let function = branching_function_with_phi(vec![(BlockId(1), ValueId(2))]);
+
+        assert_error(
+            validate_ssa(&program(vec![function])),
+            "missing incoming value from predecessor block 2",
+        );
+    }
+
+    #[test]
+    fn validate_ssa_rejects_undefined_phi_value() {
+        let function =
+            branching_function_with_phi(vec![(BlockId(1), ValueId(99)), (BlockId(2), ValueId(3))]);
+
+        assert_error(
+            validate_ssa(&program(vec![function])),
+            "phi in block 3 uses value %99 from predecessor 1 but that value is never defined",
+        );
+    }
+
+    #[test]
+    fn validate_ssa_rejects_phi_value_that_does_not_dominate_predecessor() {
+        let function =
+            branching_function_with_phi(vec![(BlockId(1), ValueId(3)), (BlockId(2), ValueId(2))]);
+
+        assert_error(
+            validate_ssa(&program(vec![function])),
+            "does not dominate predecessor block",
+        );
+    }
+
+    #[test]
+    fn validate_ssa_rejects_phi_type_mismatch() {
+        let mut function =
+            branching_function_with_phi(vec![(BlockId(1), ValueId(2)), (BlockId(2), ValueId(3))]);
+
+        function.blocks[2].instructions[0] = IrInstruction::ConstBool {
+            destination: ValueId(3),
+            value: true,
+        };
+
+        assert_error(
+            validate_ssa(&program(vec![function])),
+            "phi in block 3 has incompatible value types",
+        );
+    }
+
+    #[test]
+    fn validate_ssa_rejects_phi_destination_type_mismatch() {
+        let mut function =
+            branching_function_with_phi(vec![(BlockId(1), ValueId(2)), (BlockId(2), ValueId(3))]);
+
+        function.locals[0].ty = IrType::Bool;
+
+        assert_error(
+            validate_ssa(&program(vec![function])),
+            "phi destination %4 has type Int, but local 1 has type Bool",
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Dominance
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn computes_linear_dominators() {
+        let function = function(
+            0,
+            "test",
+            Vec::new(),
+            Vec::new(),
+            IrType::Void,
+            vec![
+                block(0, Vec::new(), Terminator::Jump(BlockId(1))),
+                block(1, Vec::new(), Terminator::Jump(BlockId(2))),
+                block(2, Vec::new(), Terminator::Return { value: None }),
+            ],
+        );
+
+        let dominance = DominanceInfo::compute(&function);
+
+        assert_eq!(dominance.immediate_dominator(BlockId(0)), None);
+        assert_eq!(dominance.immediate_dominator(BlockId(1)), Some(BlockId(0)));
+        assert_eq!(dominance.immediate_dominator(BlockId(2)), Some(BlockId(1)));
+
+        assert!(dominance.dominates(BlockId(0), BlockId(2)));
+        assert!(dominance.dominates(BlockId(1), BlockId(2)));
+        assert!(dominance.dominates(BlockId(2), BlockId(2)));
+    }
+
+    #[test]
+    fn computes_branch_join_dominance() {
+        let function = function(
+            0,
+            "test",
+            Vec::new(),
+            Vec::new(),
+            IrType::Void,
+            vec![
+                block(
+                    0,
+                    Vec::new(),
+                    Terminator::Branch {
+                        condition: ValueId(0),
+                        then_block: BlockId(1),
+                        else_block: BlockId(2),
+                    },
+                ),
+                block(1, Vec::new(), Terminator::Jump(BlockId(3))),
+                block(2, Vec::new(), Terminator::Jump(BlockId(3))),
+                block(3, Vec::new(), Terminator::Return { value: None }),
+            ],
+        );
+
+        let dominance = DominanceInfo::compute(&function);
+
+        assert!(dominance.dominates(BlockId(0), BlockId(1)));
+        assert!(dominance.dominates(BlockId(0), BlockId(2)));
+        assert!(dominance.dominates(BlockId(0), BlockId(3)));
+
+        assert!(!dominance.dominates(BlockId(1), BlockId(3)));
+        assert!(!dominance.dominates(BlockId(2), BlockId(3)));
+
+        assert_eq!(dominance.immediate_dominator(BlockId(3)), Some(BlockId(0)));
+    }
+
+    #[test]
+    fn computes_loop_dominance_frontier() {
+        let function = function(
+            0,
+            "test",
+            Vec::new(),
+            Vec::new(),
+            IrType::Void,
+            vec![
+                block(0, Vec::new(), Terminator::Jump(BlockId(1))),
+                block(
+                    1,
+                    Vec::new(),
+                    Terminator::Branch {
+                        condition: ValueId(0),
+                        then_block: BlockId(2),
+                        else_block: BlockId(3),
+                    },
+                ),
+                block(2, Vec::new(), Terminator::Jump(BlockId(1))),
+                block(3, Vec::new(), Terminator::Return { value: None }),
+            ],
+        );
+
+        let dominance = DominanceInfo::compute(&function);
+
+        assert_eq!(dominance.immediate_dominator(BlockId(1)), Some(BlockId(0)));
+        assert_eq!(dominance.immediate_dominator(BlockId(2)), Some(BlockId(1)));
+        assert_eq!(dominance.immediate_dominator(BlockId(3)), Some(BlockId(1)));
+
+        assert!(
+            dominance
+                .dominance_frontier(BlockId(2))
+                .is_some_and(|frontier| frontier.contains(&BlockId(1)))
+        );
+    }
+
+    #[test]
+    fn ignores_unreachable_blocks_in_dominance() {
+        let function = function(
+            0,
+            "test",
+            Vec::new(),
+            Vec::new(),
+            IrType::Void,
+            vec![
+                block(0, Vec::new(), Terminator::Return { value: None }),
+                block(1, Vec::new(), Terminator::Return { value: None }),
+            ],
+        );
+
+        let dominance = DominanceInfo::compute(&function);
+
+        assert!(dominance.reachable.contains(&BlockId(0)));
+        assert!(!dominance.reachable.contains(&BlockId(1)));
+
+        assert!(!dominance.dominates(BlockId(0), BlockId(1)));
+    }
+
+    // ---------------------------------------------------------------------
+    // SSA vs non-SSA validation
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn regular_validation_allows_load_and_store_local() {
+        let function = function(
+            0,
+            "test",
+            Vec::new(),
+            vec![local(0, "x", IrType::Int)],
+            IrType::Int,
+            vec![block(
+                0,
+                vec![
+                    IrInstruction::ConstInt {
+                        destination: ValueId(0),
+                        value: 42,
+                    },
+                    IrInstruction::StoreLocal {
+                        local: LocalId(0),
+                        value: ValueId(0),
+                    },
+                    IrInstruction::LoadLocal {
+                        destination: ValueId(1),
+                        local: LocalId(0),
+                    },
+                ],
+                Terminator::Return {
+                    value: Some(ValueId(1)),
+                },
+            )],
+        );
+
+        assert_valid(validate(&program(vec![function])));
+    }
+
+    #[test]
+    fn ssa_validation_rejects_load_and_store_local() {
+        let function = function(
+            0,
+            "test",
+            Vec::new(),
+            vec![local(0, "x", IrType::Int)],
+            IrType::Int,
+            vec![block(
+                0,
+                vec![
+                    IrInstruction::ConstInt {
+                        destination: ValueId(0),
+                        value: 42,
+                    },
+                    IrInstruction::StoreLocal {
+                        local: LocalId(0),
+                        value: ValueId(0),
+                    },
+                    IrInstruction::LoadLocal {
+                        destination: ValueId(1),
+                        local: LocalId(0),
+                    },
+                ],
+                Terminator::Return {
+                    value: Some(ValueId(1)),
+                },
+            )],
+        );
+
+        let result = validate_ssa(&program(vec![function]));
+        let errors = result.expect_err("expected SSA validation to fail");
+
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("StoreLocal remains")),
+            "missing StoreLocal diagnostic: {errors:#?}"
+        );
+
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("LoadLocal remains")),
+            "missing LoadLocal diagnostic: {errors:#?}"
+        );
+    }
 }

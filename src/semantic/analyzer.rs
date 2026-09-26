@@ -1078,7 +1078,18 @@ impl<'a> Analyzer<'a> {
                 name,
                 arguments,
                 span,
-            } => todo!(),
+            } => {
+                let expr = self.analyze_expr(
+                    &Expr::New {
+                        name: name.clone(),
+                        arguments: arguments.clone(),
+                        span: *span,
+                    },
+                    scope,
+                );
+
+                Ok(HirStmt::Expr(expr))
+            }
         }
     }
 

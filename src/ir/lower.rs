@@ -99,11 +99,11 @@ fn flatten_struct_fields(
     Ok(fields)
 }
 
-fn append_struct_fields(structs: &[HirStruct], struct_id: StructId, fields: &mut Vec<IrField>) {
+fn _append_struct_fields(structs: &[HirStruct], struct_id: StructId, fields: &mut Vec<IrField>) {
     let structure = &structs[struct_id.0];
 
     if let Some(base) = structure.base {
-        append_struct_fields(structs, base, fields);
+        _append_struct_fields(structs, base, fields);
     }
 
     fields.extend(structure.fields.iter().map(|field| IrField {
@@ -653,7 +653,7 @@ impl<'a> FunctionBuilder<'a> {
                     *field,
                 ) {
                     Ok(index) => index,
-                    Err(error) => {
+                    Err(_error) => {
                         // lower_expr currently cannot return CompilerError,
                         // so we should not silently discard this.
                         //

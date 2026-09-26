@@ -677,36 +677,76 @@ impl<'a> Validator<'a> {
     fn validate_values(&mut self, function: &IrFunction, dominance: &DominanceInfo) {
         let mut definitions = HashMap::<ValueId, ValueDefinition>::new();
 
+        // First discover every SSA value definition.
+        //
+        // Some instructions (notably Phi, Call, LoadField, and Binary)
+        // may need definitions that are encountered later in the block
+        // traversal. Repeat until no new definitions can be inferred.
+        loop {
+            let mut changed = false;
+
+            for block in &function.blocks {
+                if !dominance.reachable.contains(&block.id) {
+                    continue;
+                }
+
+                for instruction in &block.instructions {
+                    let Some(destination) = instruction_destination(instruction) else {
+                        continue;
+                    };
+
+                    if definitions.contains_key(&destination) {
+                        continue;
+                    }
+
+                    let Some(ty) = self.pe(function, instruction, &definitions) else {
+                        continue;
+                    };
+
+                    definitions.insert(
+                        destination,
+                        ValueDefinition {
+                            block: block.id,
+                            ty,
+                        },
+                    );
+
+                    changed = true;
+                }
+            }
+
+            if !changed {
+                break;
+            }
+        }
+
+        // Check for duplicate SSA value definitions separately.
+        //
+        // This must not be folded into the inference loop because a
+        // definition may legitimately be skipped during an early inference
+        // pass and become inferable on a later pass.
+        let mut seen = HashSet::<ValueId>::new();
+
         for block in &function.blocks {
             if !dominance.reachable.contains(&block.id) {
                 continue;
             }
 
             for instruction in &block.instructions {
-                if let Some(destination) = instruction_destination(instruction) {
-                    let Some(ty) = self.pe(function, instruction, &definitions) else {
-                        continue;
-                    };
+                let Some(destination) = instruction_destination(instruction) else {
+                    continue;
+                };
 
-                    if definitions
-                        .insert(
-                            destination,
-                            ValueDefinition {
-                                block: block.id,
-                                ty,
-                            },
-                        )
-                        .is_some()
-                    {
-                        self.error(format!(
-                            "function '{}': value %{} is defined more than once",
-                            function.name, destination.0
-                        ));
-                    }
+                if !seen.insert(destination) {
+                    self.error(format!(
+                        "function '{}': value %{} is defined more than once",
+                        function.name, destination.0
+                    ));
                 }
             }
         }
 
+        // Now that all inferable definitions are known, validate every use.
         for block in &function.blocks {
             if !dominance.reachable.contains(&block.id) {
                 continue;

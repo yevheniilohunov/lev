@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::compiler::error::CompilerError;
+use crate::semantic::symbols::LocalId;
 
 use super::ir::{BlockId, IrFunction, IrInstruction, IrProgram, Terminator, ValueId};
 use super::validate::DominanceInfo;
@@ -28,7 +29,7 @@ fn construct_function_ssa(function: &mut IrFunction) -> Result<(), Vec<CompilerE
 
     let mut allocator = ValueAllocator::from_function(function);
 
-    let mut stacks: HashMap<crate::semantic::symbols::LocalId, Vec<ValueId>> = HashMap::new();
+    let mut stacks: HashMap<LocalId, Vec<ValueId>> = HashMap::new();
 
     for local in &function.locals {
         stacks.entry(local.id).or_default();

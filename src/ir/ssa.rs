@@ -10,13 +10,9 @@ pub fn construct_ssa(program: &mut IrProgram) -> Result<(), Vec<CompilerError>> 
     let mut errors = Vec::new();
 
     for function in &mut program.functions {
-        println!("=== BEFORE SSA ===");
-        println!("{:#?}", function);
         if let Err(error) = construct_function_ssa(function) {
             errors.extend(error);
         }
-        println!("=== AFTER SSA ===");
-        println!("{:#?}", function);
     }
 
     if errors.is_empty() {

@@ -179,6 +179,8 @@ impl<'a> Validator<'a> {
             IrInstruction::ConstString { .. } => Some(IrType::String),
             IrInstruction::ConstBool { .. } => Some(IrType::Bool),
 
+            IrInstruction::Copy { source, .. } => definitions .get(source) .map(|definition| definition.ty.clone()),
+
             IrInstruction::AllocStruct { struct_id, .. }
             | IrInstruction::StructCopy { struct_id, .. } => Some(IrType::Struct(*struct_id)),
 
@@ -286,6 +288,7 @@ impl<'a> Validator<'a> {
         instruction: &IrInstruction,
         definitions: &HashMap<ValueId, ValueDefinition>,
         dominance: &DominanceInfo,
+        require_ssa: bool,
     ) {
         match instruction {
             IrInstruction::ConstInt { .. }
@@ -293,10 +296,11 @@ impl<'a> Validator<'a> {
             | IrInstruction::ConstBool { .. }
             | IrInstruction::LoadLocal { .. }
             | IrInstruction::Parameter { .. }
+            | IrInstruction::Copy { .. }
             | IrInstruction::AllocStruct { .. } => {}
 
             IrInstruction::StoreLocal { local, value } => {
-                self.require_value(function, use_block, *value, definitions, dominance);
+                self.require_value(function, use_block, *value, definitions, dominance, require_ssa);
 
                 if let Some(value_ty) = self.value_type(*value, definitions) {
                     if let Some(local_ty) = self.local_type(function, *local) {
@@ -313,8 +317,8 @@ impl<'a> Validator<'a> {
             IrInstruction::Binary {
                 op, left, right, ..
             } => {
-                self.require_value(function, use_block, *left, definitions, dominance);
-                self.require_value(function, use_block, *right, definitions, dominance);
+                self.require_value(function, use_block, *left, definitions, dominance, require_ssa);
+                self.require_value(function, use_block, *right, definitions, dominance, require_ssa);
 
                 let left_ty = self.value_type(*left, definitions);
                 let right_ty = self.value_type(*right, definitions);
@@ -352,7 +356,7 @@ impl<'a> Validator<'a> {
                 destination,
             } => {
                 for argument in arguments {
-                    self.require_value(function, use_block, *argument, definitions, dominance);
+                    self.require_value(function, use_block, *argument, definitions, dominance, require_ssa);
                 }
 
                 let Some(target_function) = self
@@ -443,7 +447,7 @@ impl<'a> Validator<'a> {
                 field,
                 destination,
             } => {
-                self.require_value(function, use_block, *receiver, definitions, dominance);
+                self.require_value(function, use_block, *receiver, definitions, dominance, require_ssa);
 
                 let Some(receiver_ty) = self.value_type(*receiver, definitions) else {
                     return;
@@ -482,9 +486,9 @@ impl<'a> Validator<'a> {
                 field,
                 value,
             } => {
-                self.require_value(function, use_block, *receiver, definitions, dominance);
+                self.require_value(function, use_block, *receiver, definitions, dominance, require_ssa);
 
-                self.require_value(function, use_block, *value, definitions, dominance);
+                self.require_value(function, use_block, *value, definitions, dominance, require_ssa);
 
                 let Some(receiver_ty) = self.value_type(*receiver, definitions) else {
                     return;
@@ -519,7 +523,7 @@ impl<'a> Validator<'a> {
             IrInstruction::StructCopy {
                 source, struct_id, ..
             } => {
-                self.require_value(function, use_block, *source, definitions, dominance);
+                self.require_value(function, use_block, *source, definitions, dominance, require_ssa);
 
                 if let Some(source_ty) = self.value_type(*source, definitions) {
                     let expected = IrType::Struct(*struct_id);
@@ -556,10 +560,14 @@ impl<'a> Validator<'a> {
         }
 
         if function.entry.0 < function.blocks.len() {
-            let dominance = DominanceInfo::compute(function);
-            self.validate_values(function, &dominance);
-            self.validate_dominance(function, &dominance);
-        }
+    let dominance = DominanceInfo::compute(function);
+
+    self.validate_values(function, &dominance, require_ssa);
+
+    if require_ssa {
+        self.validate_dominance(function, &dominance);
+    }
+}
     }
 
     fn validate_entry(&mut self, function: &IrFunction) {
@@ -733,7 +741,7 @@ impl<'a> Validator<'a> {
         }
     }
 
-    fn validate_values(&mut self, function: &IrFunction, dominance: &DominanceInfo) {
+    fn validate_values(&mut self, function: &IrFunction, dominance: &DominanceInfo, require_ssa: bool) {
         let mut definitions = HashMap::<ValueId, ValueDefinition>::new();
 
         // First discover every SSA value definition.
@@ -779,7 +787,8 @@ impl<'a> Validator<'a> {
             }
         }
 
-        // Check for duplicate SSA value definitions separately.
+        if require_ssa {
+            // Check for duplicate SSA value definitions separately.
         //
         // This must not be folded into the inference loop because a
         // definition may legitimately be skipped during an early inference
@@ -804,7 +813,9 @@ impl<'a> Validator<'a> {
                 }
             }
         }
+        }
 
+       
         // Now that all inferable definitions are known, validate every use.
         for block in &function.blocks {
             if !dominance.reachable.contains(&block.id) {
@@ -818,6 +829,7 @@ impl<'a> Validator<'a> {
                     instruction,
                     &definitions,
                     dominance,
+                    require_ssa
                 );
             }
 
@@ -827,6 +839,7 @@ impl<'a> Validator<'a> {
                 &block.terminator,
                 &definitions,
                 dominance,
+                require_ssa
             );
         }
 
@@ -957,17 +970,18 @@ impl<'a> Validator<'a> {
         terminator: &Terminator,
         definitions: &HashMap<ValueId, ValueDefinition>,
         dominance: &DominanceInfo,
+        require_ssa: bool
     ) {
         match terminator {
             Terminator::Jump(_) => {}
 
             Terminator::Branch { condition, .. } => {
-                self.require_value(function, use_block, *condition, definitions, dominance);
+                self.require_value(function, use_block, *condition, definitions, dominance, require_ssa);
             }
 
             Terminator::Return { value } => {
                 if let Some(value) = value {
-                    self.require_value(function, use_block, *value, definitions, dominance);
+                    self.require_value(function, use_block, *value, definitions, dominance, require_ssa);
                 }
             }
 
@@ -982,6 +996,7 @@ impl<'a> Validator<'a> {
         value: ValueId,
         definitions: &HashMap<ValueId, ValueDefinition>,
         dominance: &DominanceInfo,
+        require_ssa: bool,
     ) {
         let Some(definition) = definitions.get(&value) else {
             self.error(format!(
@@ -991,7 +1006,7 @@ impl<'a> Validator<'a> {
             return;
         };
 
-        if !dominance.dominates(definition.block, use_block) {
+        if require_ssa && !dominance.dominates(definition.block, use_block) {
             self.error(format!(
         "function '{}': value %{} is defined in block {} but used in block {} where the definition does not dominate the use",
         function.name,
@@ -1064,6 +1079,8 @@ fn instruction_destination(instruction: &IrInstruction) -> Option<ValueId> {
         | IrInstruction::Parameter { destination, .. }
         | IrInstruction::Phi { destination, .. }
         | IrInstruction::StructCopy { destination, .. }
+        | IrInstruction::Copy { destination, .. }
+
         | IrInstruction::Binary { destination, .. } => Some(*destination),
 
         IrInstruction::StoreLocal { .. } => None,
@@ -1874,7 +1891,7 @@ mod tests {
         );
 
         assert_error(
-            validate(&program(vec![function])),
+            validate_ssa(&program(vec![function])),
             "value %0 is defined more than once",
         );
     }
@@ -1920,7 +1937,7 @@ mod tests {
         );
 
         assert_error(
-            validate(&program(vec![function])),
+            validate_ssa(&program(vec![function])),
             "does not dominate the use",
         );
     }

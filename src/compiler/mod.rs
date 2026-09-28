@@ -31,5 +31,10 @@ pub fn compile(source: &str) -> Result<ir::IrProgram, Vec<CompilerError>> {
      */
     ir::validate_ssa(&ir)?;
 
+    ir::phi::lower_phis(&mut ir)?;
+
+    // Validate the resulting non-SSA IR.
+    ir::validate(&ir)?;
+
     Ok(ir)
 }

@@ -138,7 +138,7 @@ struct FunctionCodegen<'a> {
     program: &'a IrProgram,
     function: &'a IrFunction,
     value_slots: HashMap<ValueId, i32>,
-    edge_copies: HashMap<BlockId, Vec<(ValueId, ValueId)>>,
+    edge_copies: HashMap<(BlockId, BlockId), Vec<(ValueId, ValueId)>>,
     struct_storage: HashMap<ValueId, i32>,
     function_names: &'a HashMap<Option<FunctionId>, String>,
     next_stack_offset: i32,
@@ -285,7 +285,7 @@ impl<'a> FunctionCodegen<'a> {
 
                 for &(predecessor, source_value) in sources {
                     self.edge_copies
-                        .entry(predecessor)
+                        .entry((predecessor, block.id))
                         .or_default()
                         .push((source_value, *destination));
                 }
@@ -293,8 +293,12 @@ impl<'a> FunctionCodegen<'a> {
         }
     }
 
-    fn emit_edge_copies(&mut self, predecessor: BlockId) -> Result<(), Vec<CompilerError>> {
-        let Some(copies) = self.edge_copies.get(&predecessor).cloned() else {
+    fn emit_edge_copies(
+        &mut self,
+        predecessor: BlockId,
+        successor: BlockId,
+    ) -> Result<(), Vec<CompilerError>> {
+        let Some(copies) = self.edge_copies.get(&(predecessor, successor)).cloned() else {
             return Ok(());
         };
 
@@ -324,15 +328,12 @@ impl<'a> FunctionCodegen<'a> {
         &mut self,
         copies: &[(ValueId, ValueId)],
     ) -> Result<(), Vec<CompilerError>> {
-        let mut pending: Vec<(ValueId, ValueId)> = copies.to_vec();
+        let mut pending = copies.to_vec();
 
         while !pending.is_empty() {
-            let mut progress = false;
-
-            // First emit copies whose destination is not used as a source
-            // by another pending copy.
             let sources: HashSet<ValueId> = pending.iter().map(|(source, _)| *source).collect();
 
+            let mut progress = false;
             let mut index = 0;
 
             while index < pending.len() {
@@ -344,6 +345,8 @@ impl<'a> FunctionCodegen<'a> {
                     continue;
                 }
 
+                // Safe when the destination is not needed as a source
+                // by any remaining copy.
                 if !sources.contains(&destination) {
                     self.emit_load(source, "rax")?;
                     self.emit_store(destination, "rax")?;
@@ -359,48 +362,55 @@ impl<'a> FunctionCodegen<'a> {
                 continue;
             }
 
-            // No safe copy was found, so there is a cycle.
+            // We have a cycle.
             //
-            // Break the cycle by saving one source value in the temporary
-            // stack slot.
-            let (source, destination) = pending[0];
+            // Example:
+            //
+            //     a <- b
+            //     b <- a
+            //
+            // Save `a`, then perform:
+            //
+            //     a <- b
+            //     b <- temp
+            //
+            // For longer cycles the same backwards traversal works.
+            let (source, _) = pending[0];
 
             self.emit_load(source, "rax")?;
 
             writeln!(self.output, "    mov [rbp-{}], rax", self.phi_temp_offset)
-                .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                .map_err(|error| vec![CompilerError::internal(error.to_string())])?;
 
-            // Replace the source of this copy with a special temporary
-            // representation by removing it and carrying the destination
-            // forward.
-            pending.remove(0);
+            // Remove the copy whose source we saved.
+            let first_index = pending
+                .iter()
+                .position(|(candidate_source, _)| *candidate_source == source)
+                .expect("cycle source must exist");
 
-            let mut current_destination = destination;
+            pending.remove(first_index);
+
+            let mut current_destination = source;
 
             loop {
-                let next_index = pending
+                let Some(index) = pending
                     .iter()
-                    .position(|(_, destination)| *destination == source);
-
-                let Some(next_index) = next_index else {
+                    .position(|(_, destination)| *destination == current_destination)
+                else {
                     break;
                 };
 
-                let (next_source, next_destination) = pending.remove(next_index);
+                let (next_source, _) = pending.remove(index);
 
                 self.emit_load(next_source, "rax")?;
                 self.emit_store(current_destination, "rax")?;
 
-                current_destination = next_destination;
-
-                if next_source == source {
-                    break;
-                }
+                current_destination = next_source;
             }
 
-            // Restore the original value from the temporary slot.
+            // Complete the cycle with the saved original value.
             writeln!(self.output, "    mov rax, [rbp-{}]", self.phi_temp_offset)
-                .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                .map_err(|error| vec![CompilerError::internal(error.to_string())])?;
 
             self.emit_store(current_destination, "rax")?;
         }
@@ -476,12 +486,7 @@ impl<'a> FunctionCodegen<'a> {
             self.emit_instruction(instruction)?;
         }
 
-        // Phi copies belong to the predecessor edge, so they must happen
-        // after ordinary instructions in this block but before its
-        // terminator transfers control.
-        self.emit_edge_copies(block.id)?;
-
-        self.emit_terminator(&block.terminator)?;
+        self.emit_terminator(block.id, &block.terminator)?;
 
         Ok(())
     }
@@ -785,6 +790,13 @@ impl<'a> FunctionCodegen<'a> {
 
                 self.emit_store(*destination, "rdx")?;
             }
+            IrInstruction::Copy {
+                destination,
+                source,
+            } => {
+                self.emit_load(*source, "rax")?;
+                self.emit_store(*destination, "rax")?;
+            }
         }
 
         Ok(())
@@ -830,9 +842,15 @@ impl<'a> FunctionCodegen<'a> {
     // Terminators
     // ---------------------------------------------------------------------
 
-    fn emit_terminator(&mut self, terminator: &Terminator) -> Result<(), Vec<CompilerError>> {
+    fn emit_terminator(
+        &mut self,
+        predecessor: BlockId,
+        terminator: &Terminator,
+    ) -> Result<(), Vec<CompilerError>> {
         match terminator {
             Terminator::Jump(block) => {
+                self.emit_edge_copies(predecessor, *block)?;
+
                 writeln!(self.output, "    jmp {}", self.block_label(*block))
                     .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
             }
@@ -956,6 +974,7 @@ fn instruction_destination(instruction: &IrInstruction) -> Option<ValueId> {
         IrInstruction::StructCopy { destination, .. } => Some(*destination),
 
         IrInstruction::StoreField { .. } => None,
+        IrInstruction::Copy { destination, .. } => Some(*destination),
     }
 }
 

@@ -81,6 +81,11 @@ pub enum IrInstruction {
         local: LocalId,
     },
 
+    Copy {
+        destination: ValueId,
+        source: ValueId,
+    },
+
     StructCopy {
         destination: ValueId,
         source: ValueId,
@@ -132,7 +137,7 @@ pub enum IrInstruction {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Terminator {
     Jump(BlockId),
 

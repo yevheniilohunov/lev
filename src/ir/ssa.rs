@@ -10,9 +10,13 @@ pub fn construct_ssa(program: &mut IrProgram) -> Result<(), Vec<CompilerError>> 
     let mut errors = Vec::new();
 
     for function in &mut program.functions {
+        println!("=== BEFORE SSA ===");
+        println!("{:#?}", function);
         if let Err(error) = construct_function_ssa(function) {
             errors.extend(error);
         }
+        println!("=== AFTER SSA ===");
+        println!("{:#?}", function);
     }
 
     if errors.is_empty() {
@@ -440,6 +444,18 @@ fn rename_block(
                     field,
                 });
             }
+
+            IrInstruction::Copy {
+                destination,
+                source,
+            } => {
+                let source = resolve_alias(aliases, source);
+                new_instructions.push(IrInstruction::Copy {
+                    destination,
+                    source,
+                });
+            }
+
             IrInstruction::StructCopy {
                 destination,
                 source,
@@ -672,6 +688,7 @@ fn instruction_destination(instruction: &IrInstruction) -> Option<ValueId> {
         | IrInstruction::Binary { destination, .. }
         | IrInstruction::LoadField { destination, .. }
         | IrInstruction::AllocStruct { destination, .. }
+        | IrInstruction::Copy { destination, .. }
         | IrInstruction::StructCopy { destination, .. }
         | IrInstruction::Phi { destination, .. } => Some(*destination),
 

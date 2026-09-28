@@ -36,6 +36,8 @@ pub fn compile(source: &str) -> Result<ir::IrProgram, Vec<CompilerError>> {
     // Remove unreachable CFG blocks.
     ir::cleanup::remove_unreachable_blocks(&mut ir)?;
 
+    ir::cleanup::eliminate_dead_code(&mut ir)?;
+
     // Validate the resulting non-SSA IR.
     ir::validate(&ir)?;
 
@@ -136,9 +138,11 @@ mod tests {
             "final IR should be non-SSA without local or phi instructions"
         );
 
+        let reachable = function.reachable_blocks();
+
         for block in &function.blocks {
             assert!(
-                function.reachable_blocks().contains(&block.id),
+                reachable.contains(&block.id),
                 "final cleanup should leave only reachable blocks"
             );
         }

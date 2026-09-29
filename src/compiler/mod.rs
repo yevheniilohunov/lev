@@ -33,6 +33,9 @@ pub fn compile(source: &str) -> Result<ir::IrProgram, Vec<CompilerError>> {
     // Validate the cleaned non-SSA IR.
     ir::validate(&ir)?;
 
+    // Propagate known constants.
+    ir::cleanup::constant_propagate(&mut ir)?;
+
     // Fold constant integer expressions.
     ir::cleanup::constant_fold(&mut ir)?;
 

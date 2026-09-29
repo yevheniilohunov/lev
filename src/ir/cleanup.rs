@@ -292,6 +292,55 @@ fn fold_integer_binary(op: IrBinaryOp, left: i64, right: i64) -> Option<i64> {
     }
 }
 
+pub fn constant_propagate(program: &mut IrProgram) -> Result<(), Vec<CompilerError>> {
+    let mut errors = Vec::new();
+
+    for function in &mut program.functions {
+        if let Err(error) = constant_propagate_function(function) {
+            errors.extend(error);
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+fn constant_propagate_function(function: &mut IrFunction) -> Result<(), Vec<CompilerError>> {
+    let mut constants = HashMap::<ValueId, i64>::new();
+
+    for block in &mut function.blocks {
+        for instruction in &mut block.instructions {
+            let propagated = match instruction {
+                IrInstruction::ConstInt { destination, value } => {
+                    constants.insert(*destination, *value);
+                    None
+                }
+
+                IrInstruction::Copy {
+                    destination,
+                    source,
+                } => constants
+                    .get(source)
+                    .copied()
+                    .map(|value| (*destination, value)),
+
+                _ => None,
+            };
+
+            if let Some((destination, value)) = propagated {
+                *instruction = IrInstruction::ConstInt { destination, value };
+
+                constants.insert(destination, value);
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -814,6 +863,112 @@ mod tests {
                 op: IrBinaryOp::Divide,
                 left: ValueId(0),
                 right: ValueId(1),
+            }
+        ));
+    }
+
+    #[test]
+    fn propagates_integer_constant_through_copy() {
+        let function = IrFunction {
+            id: Some(FunctionId(0)),
+            name: "constant_propagation_test".to_string(),
+            owner: None,
+            parameters: Vec::new(),
+            locals: Vec::new(),
+            return_type: IrType::Int,
+            entry: BlockId(0),
+            blocks: vec![BasicBlock {
+                id: BlockId(0),
+                instructions: vec![
+                    IrInstruction::ConstInt {
+                        destination: ValueId(0),
+                        value: 42,
+                    },
+                    IrInstruction::Copy {
+                        destination: ValueId(1),
+                        source: ValueId(0),
+                    },
+                ],
+                terminator: Terminator::Return {
+                    value: Some(ValueId(1)),
+                },
+            }],
+        };
+
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![function],
+        };
+
+        constant_propagate(&mut program).expect("constant propagation should succeed");
+
+        let instructions = &program.functions[0].blocks[0].instructions;
+
+        assert_eq!(instructions.len(), 2);
+
+        assert!(matches!(
+            instructions[1],
+            IrInstruction::ConstInt {
+                destination: ValueId(1),
+                value: 42,
+            }
+        ));
+    }
+
+    #[test]
+    fn propagates_constants_into_constant_folding() {
+        let function = IrFunction {
+            id: Some(FunctionId(0)),
+            name: "constant_propagation_test".to_string(),
+            owner: None,
+            parameters: Vec::new(),
+            locals: Vec::new(),
+            return_type: IrType::Int,
+            entry: BlockId(0),
+            blocks: vec![BasicBlock {
+                id: BlockId(0),
+                instructions: vec![
+                    IrInstruction::ConstInt {
+                        destination: ValueId(0),
+                        value: 10,
+                    },
+                    IrInstruction::Copy {
+                        destination: ValueId(1),
+                        source: ValueId(0),
+                    },
+                    IrInstruction::ConstInt {
+                        destination: ValueId(2),
+                        value: 20,
+                    },
+                    IrInstruction::Binary {
+                        destination: ValueId(3),
+                        op: IrBinaryOp::Add,
+                        left: ValueId(1),
+                        right: ValueId(2),
+                    },
+                ],
+                terminator: Terminator::Return {
+                    value: Some(ValueId(3)),
+                },
+            }],
+        };
+
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![function],
+        };
+
+        constant_propagate(&mut program).expect("constant propagation should succeed");
+
+        constant_fold(&mut program).expect("constant folding should succeed");
+
+        let instructions = &program.functions[0].blocks[0].instructions;
+
+        assert!(matches!(
+            instructions[3],
+            IrInstruction::ConstInt {
+                destination: ValueId(3),
+                value: 30,
             }
         ));
     }

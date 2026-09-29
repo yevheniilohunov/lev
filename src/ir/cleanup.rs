@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::{
     compiler::error::CompilerError,
@@ -215,6 +215,81 @@ fn cleanup_function(function: &mut IrFunction) -> Result<(), Vec<CompilerError>>
         .retain(|block| reachable.contains(&block.id));
 
     Ok(())
+}
+
+pub fn constant_fold(program: &mut IrProgram) -> Result<(), Vec<CompilerError>> {
+    let mut errors = Vec::new();
+
+    for function in &mut program.functions {
+        if let Err(error) = constant_fold_function(function) {
+            errors.extend(error);
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+fn constant_fold_function(function: &mut IrFunction) -> Result<(), Vec<CompilerError>> {
+    let mut constants = HashMap::<ValueId, i64>::new();
+
+    for block in &mut function.blocks {
+        for instruction in &mut block.instructions {
+            let folded = match instruction {
+                IrInstruction::ConstInt { destination, value } => {
+                    constants.insert(*destination, *value);
+                    None
+                }
+
+                IrInstruction::Binary {
+                    destination,
+                    op,
+                    left,
+                    right,
+                } => {
+                    let Some(left_value) = constants.get(left).copied() else {
+                        continue;
+                    };
+
+                    let Some(right_value) = constants.get(right).copied() else {
+                        continue;
+                    };
+
+                    fold_integer_binary(*op, left_value, right_value)
+                        .map(|value| (*destination, value))
+                }
+
+                _ => None,
+            };
+
+            if let Some((destination, value)) = folded {
+                *instruction = IrInstruction::ConstInt { destination, value };
+
+                constants.insert(destination, value);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn fold_integer_binary(op: IrBinaryOp, left: i64, right: i64) -> Option<i64> {
+    match op {
+        IrBinaryOp::Add => left.checked_add(right),
+        IrBinaryOp::Subtract => left.checked_sub(right),
+        IrBinaryOp::Multiply => left.checked_mul(right),
+        IrBinaryOp::Divide => {
+            if right == 0 {
+                None
+            } else {
+                left.checked_div(right)
+            }
+        }
+        IrBinaryOp::Equal => Some((left == right) as i64),
+    }
 }
 
 #[cfg(test)]
@@ -571,6 +646,174 @@ mod tests {
             IrInstruction::ConstInt {
                 destination: ValueId(0),
                 value: 1,
+            }
+        ));
+    }
+
+    #[test]
+    fn folds_integer_addition() {
+        let function = IrFunction {
+            id: Some(FunctionId(0)),
+            name: "constant_fold_test".to_string(),
+            owner: None,
+            parameters: Vec::new(),
+            locals: Vec::new(),
+            return_type: IrType::Int,
+            entry: BlockId(0),
+            blocks: vec![BasicBlock {
+                id: BlockId(0),
+                instructions: vec![
+                    IrInstruction::ConstInt {
+                        destination: ValueId(0),
+                        value: 10,
+                    },
+                    IrInstruction::ConstInt {
+                        destination: ValueId(1),
+                        value: 20,
+                    },
+                    IrInstruction::Binary {
+                        destination: ValueId(2),
+                        op: IrBinaryOp::Add,
+                        left: ValueId(0),
+                        right: ValueId(1),
+                    },
+                ],
+                terminator: Terminator::Return {
+                    value: Some(ValueId(2)),
+                },
+            }],
+        };
+
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![function],
+        };
+
+        constant_fold(&mut program).expect("constant folding should succeed");
+
+        let instructions = &program.functions[0].blocks[0].instructions;
+
+        assert_eq!(instructions.len(), 3);
+
+        assert!(matches!(
+            instructions[2],
+            IrInstruction::ConstInt {
+                destination: ValueId(2),
+                value: 30,
+            }
+        ));
+    }
+
+    #[test]
+    fn folds_integer_arithmetic() {
+        let cases = [
+            (IrBinaryOp::Subtract, 20, 5, 15),
+            (IrBinaryOp::Multiply, 6, 7, 42),
+            (IrBinaryOp::Divide, 42, 6, 7),
+        ];
+
+        for (op, left, right, expected) in cases {
+            let function = IrFunction {
+                id: Some(FunctionId(0)),
+                name: "constant_fold_test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Int,
+                entry: BlockId(0),
+                blocks: vec![BasicBlock {
+                    id: BlockId(0),
+                    instructions: vec![
+                        IrInstruction::ConstInt {
+                            destination: ValueId(0),
+                            value: left,
+                        },
+                        IrInstruction::ConstInt {
+                            destination: ValueId(1),
+                            value: right,
+                        },
+                        IrInstruction::Binary {
+                            destination: ValueId(2),
+                            op,
+                            left: ValueId(0),
+                            right: ValueId(1),
+                        },
+                    ],
+                    terminator: Terminator::Return {
+                        value: Some(ValueId(2)),
+                    },
+                }],
+            };
+
+            let mut program = IrProgram {
+                structs: Vec::new(),
+                functions: vec![function],
+            };
+
+            constant_fold(&mut program).expect("constant folding should succeed");
+
+            let instructions = &program.functions[0].blocks[0].instructions;
+
+            assert!(matches!(
+                instructions[2],
+                IrInstruction::ConstInt {
+                    destination: ValueId(2),
+                    value,
+                } if value == expected
+            ));
+        }
+    }
+
+    #[test]
+    fn does_not_fold_division_by_zero() {
+        let function = IrFunction {
+            id: Some(FunctionId(0)),
+            name: "constant_fold_test".to_string(),
+            owner: None,
+            parameters: Vec::new(),
+            locals: Vec::new(),
+            return_type: IrType::Int,
+            entry: BlockId(0),
+            blocks: vec![BasicBlock {
+                id: BlockId(0),
+                instructions: vec![
+                    IrInstruction::ConstInt {
+                        destination: ValueId(0),
+                        value: 42,
+                    },
+                    IrInstruction::ConstInt {
+                        destination: ValueId(1),
+                        value: 0,
+                    },
+                    IrInstruction::Binary {
+                        destination: ValueId(2),
+                        op: IrBinaryOp::Divide,
+                        left: ValueId(0),
+                        right: ValueId(1),
+                    },
+                ],
+                terminator: Terminator::Return {
+                    value: Some(ValueId(2)),
+                },
+            }],
+        };
+
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![function],
+        };
+
+        constant_fold(&mut program).expect("constant folding should succeed");
+
+        let instructions = &program.functions[0].blocks[0].instructions;
+
+        assert!(matches!(
+            instructions[2],
+            IrInstruction::Binary {
+                destination: ValueId(2),
+                op: IrBinaryOp::Divide,
+                left: ValueId(0),
+                right: ValueId(1),
             }
         ));
     }

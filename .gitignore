@@ -2,6 +2,8 @@
 .idea/
 .vscode/
 
-/examples
+/examples/*
+
+!/examples/hello.lev
 
 /target

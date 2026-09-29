@@ -16,19 +16,13 @@ pub fn compile(source: &str) -> Result<ir::IrProgram, Vec<CompilerError>> {
 
     let mut ir = ir::lower::lower_to_ir(hir)?;
 
-    /*
-     * Validate the CFG before SSA construction.
-     */
+    // Validate the CFG before SSA construction.
     ir::validate(&ir)?;
 
-    /*
-     * Convert local-variable based IR into SSA.
-     */
+    // Convert local-variable based IR into SSA.
     ir::construct_ssa(&mut ir)?;
 
-    /*
-     * Validate the resulting SSA IR.
-     */
+    // Validate the resulting SSA IR.
     ir::validate_ssa(&ir)?;
 
     ir::phi::lower_phis(&mut ir)?;
@@ -36,9 +30,13 @@ pub fn compile(source: &str) -> Result<ir::IrProgram, Vec<CompilerError>> {
     // Remove unreachable CFG blocks.
     ir::cleanup::remove_unreachable_blocks(&mut ir)?;
 
+    // Validate the cleaned non-SSA IR.
+    ir::validate(&ir)?;
+
+    // Remove unused pure instructions.
     ir::cleanup::eliminate_dead_code(&mut ir)?;
 
-    // Validate the resulting non-SSA IR.
+    // Validate the final optimized IR.
     ir::validate(&ir)?;
 
     Ok(ir)
@@ -162,5 +160,47 @@ mod tests {
             errors.iter().any(|error| error.message.contains("return")),
             "expected return-type error, got: {errors:#?}"
         );
+    }
+
+    #[test]
+    fn compile_removes_dead_instructions_from_final_ir() {
+        let source = r#"
+        fn main(): int {
+            let used: int = 10;
+            let dead: int = 20;
+            return used;
+        }
+    "#;
+
+        let program =
+            crate::compiler::compile(source).expect("program should compile successfully");
+
+        let main = program
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .expect("main function should exist");
+
+        let instructions = main
+            .blocks
+            .iter()
+            .flat_map(|block| block.instructions.iter())
+            .collect::<Vec<_>>();
+
+        // The value returned by main is still needed.
+        assert!(instructions.iter().any(|instruction| {
+            matches!(
+                instruction,
+                crate::ir::IrInstruction::ConstInt { value: 10, .. }
+            )
+        }));
+
+        // The unused `dead` local must disappear completely from the final IR.
+        assert!(!instructions.iter().any(|instruction| {
+            matches!(
+                instruction,
+                crate::ir::IrInstruction::ConstInt { value: 20, .. }
+            )
+        }));
     }
 }

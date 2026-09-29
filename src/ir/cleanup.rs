@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{
     compiler::error::CompilerError,
-    ir::{IrInstruction, Terminator, ValueId},
+    ir::{BlockId, IrInstruction, Terminator, ValueId},
 };
 
 use super::ir::{IrBinaryOp, IrFunction, IrProgram};
@@ -358,23 +358,76 @@ pub fn copy_propagate(program: &mut IrProgram) -> Result<(), Vec<CompilerError>>
 }
 
 fn copy_propagate_function(function: &mut IrFunction) -> Result<(), Vec<CompilerError>> {
+    let predecessors = build_predecessors(function);
+
+    let mut in_facts = HashMap::<BlockId, HashMap<ValueId, ValueId>>::new();
+    let mut out_facts = HashMap::<BlockId, HashMap<ValueId, ValueId>>::new();
+
+    // The entry block starts with no incoming copy facts.
+    in_facts.insert(function.entry, HashMap::new());
+
+    // Compute a conservative fixed point.
+    //
+    // For blocks with multiple predecessors, a copy is propagated only
+    // when every predecessor agrees on the same source.
+    loop {
+        let mut changed = false;
+
+        for block in &function.blocks {
+            let block_id = block.id;
+
+            let new_in = if block_id == function.entry {
+                HashMap::new()
+            } else {
+                let preds = predecessors.get(&block_id).cloned().unwrap_or_default();
+
+                if preds.is_empty() {
+                    HashMap::new()
+                } else {
+                    intersect_copy_facts(&preds, &out_facts)
+                }
+            };
+
+            if in_facts.get(&block_id) != Some(&new_in) {
+                in_facts.insert(block_id, new_in.clone());
+                changed = true;
+            }
+
+            let mut facts = new_in;
+
+            for instruction in &block.instructions {
+                transfer_copy_fact(instruction, &mut facts);
+            }
+
+            if out_facts.get(&block_id) != Some(&facts) {
+                out_facts.insert(block_id, facts);
+                changed = true;
+            }
+        }
+
+        if !changed {
+            break;
+        }
+    }
+
+    // Rewrite using the fixed-point facts.
     for block in &mut function.blocks {
-        let mut copies = HashMap::<ValueId, ValueId>::new();
+        let mut facts = in_facts.get(&block.id).cloned().unwrap_or_default();
 
         for instruction in &mut block.instructions {
-            rewrite_instruction_values(instruction, &copies);
+            rewrite_instruction_values(instruction, &facts);
 
             if let IrInstruction::Copy {
                 destination,
                 source,
             } = instruction
             {
-                let source = resolve_copy(*source, &copies);
-                copies.insert(*destination, source);
+                let source = resolve_copy(*source, &facts);
+                facts.insert(*destination, source);
             }
         }
 
-        rewrite_terminator_values(&mut block.terminator, &copies);
+        rewrite_terminator_values(&mut block.terminator, &facts);
 
         block
             .instructions
@@ -382,6 +435,68 @@ fn copy_propagate_function(function: &mut IrFunction) -> Result<(), Vec<Compiler
     }
 
     Ok(())
+}
+
+fn build_predecessors(function: &IrFunction) -> HashMap<BlockId, Vec<BlockId>> {
+    let mut predecessors = HashMap::<BlockId, Vec<BlockId>>::new();
+
+    for block in &function.blocks {
+        match &block.terminator {
+            Terminator::Jump(target) => {
+                predecessors.entry(*target).or_default().push(block.id);
+            }
+
+            Terminator::Branch {
+                then_block,
+                else_block,
+                ..
+            } => {
+                predecessors.entry(*then_block).or_default().push(block.id);
+
+                predecessors.entry(*else_block).or_default().push(block.id);
+            }
+
+            Terminator::Return { .. } | Terminator::Unreachable => {}
+        }
+    }
+
+    predecessors
+}
+
+fn intersect_copy_facts(
+    predecessors: &[BlockId],
+    out_facts: &HashMap<BlockId, HashMap<ValueId, ValueId>>,
+) -> HashMap<ValueId, ValueId> {
+    let Some(first) = predecessors.first() else {
+        return HashMap::new();
+    };
+
+    let Some(first_facts) = out_facts.get(first) else {
+        return HashMap::new();
+    };
+
+    let mut result = first_facts.clone();
+
+    for predecessor in &predecessors[1..] {
+        let Some(facts) = out_facts.get(predecessor) else {
+            return HashMap::new();
+        };
+
+        result.retain(|value, source| facts.get(value) == Some(source));
+    }
+
+    result
+}
+
+fn transfer_copy_fact(instruction: &IrInstruction, facts: &mut HashMap<ValueId, ValueId>) {
+    if let IrInstruction::Copy {
+        destination,
+        source,
+    } = instruction
+    {
+        let source = resolve_copy(*source, facts);
+        facts.insert(*destination, source);
+    }
 }
 
 fn resolve_copy(value: ValueId, copies: &HashMap<ValueId, ValueId>) -> ValueId {
@@ -1153,6 +1268,140 @@ mod tests {
                 op: IrBinaryOp::Add,
                 left: ValueId(0),
                 right: ValueId(2),
+            }
+        ));
+    }
+
+    #[test]
+    fn does_not_propagate_copy_when_predecessors_disagree() {
+        let function = IrFunction {
+            id: Some(FunctionId(0)),
+            name: "cfg_copy_test".to_string(),
+            owner: None,
+            parameters: Vec::new(),
+            locals: Vec::new(),
+            return_type: IrType::Int,
+            entry: BlockId(0),
+            blocks: vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    instructions: vec![
+                        IrInstruction::Parameter {
+                            destination: ValueId(0),
+                            local: LocalId(0),
+                        },
+                        IrInstruction::Parameter {
+                            destination: ValueId(1),
+                            local: LocalId(1),
+                        },
+                    ],
+                    terminator: Terminator::Branch {
+                        condition: ValueId(0),
+                        then_block: BlockId(1),
+                        else_block: BlockId(2),
+                    },
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    instructions: vec![IrInstruction::Copy {
+                        destination: ValueId(2),
+                        source: ValueId(0),
+                    }],
+                    terminator: Terminator::Jump(BlockId(3)),
+                },
+                BasicBlock {
+                    id: BlockId(2),
+                    instructions: vec![IrInstruction::Copy {
+                        destination: ValueId(2),
+                        source: ValueId(1),
+                    }],
+                    terminator: Terminator::Jump(BlockId(3)),
+                },
+                BasicBlock {
+                    id: BlockId(3),
+                    instructions: vec![],
+                    terminator: Terminator::Return {
+                        value: Some(ValueId(2)),
+                    },
+                },
+            ],
+        };
+
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![function],
+        };
+
+        copy_propagate(&mut program).expect("copy propagation should succeed");
+
+        assert!(matches!(
+            program.functions[0].blocks[3].terminator,
+            Terminator::Return {
+                value: Some(ValueId(2)),
+            }
+        ));
+    }
+
+    #[test]
+    fn propagates_copy_when_all_predecessors_agree() {
+        let function = IrFunction {
+            id: Some(FunctionId(0)),
+            name: "cfg_copy_test".to_string(),
+            owner: None,
+            parameters: Vec::new(),
+            locals: Vec::new(),
+            return_type: IrType::Int,
+            entry: BlockId(0),
+            blocks: vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    instructions: vec![IrInstruction::Parameter {
+                        destination: ValueId(0),
+                        local: LocalId(0),
+                    }],
+                    terminator: Terminator::Branch {
+                        condition: ValueId(0),
+                        then_block: BlockId(1),
+                        else_block: BlockId(2),
+                    },
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    instructions: vec![IrInstruction::Copy {
+                        destination: ValueId(2),
+                        source: ValueId(0),
+                    }],
+                    terminator: Terminator::Jump(BlockId(3)),
+                },
+                BasicBlock {
+                    id: BlockId(2),
+                    instructions: vec![IrInstruction::Copy {
+                        destination: ValueId(2),
+                        source: ValueId(0),
+                    }],
+                    terminator: Terminator::Jump(BlockId(3)),
+                },
+                BasicBlock {
+                    id: BlockId(3),
+                    instructions: vec![],
+                    terminator: Terminator::Return {
+                        value: Some(ValueId(2)),
+                    },
+                },
+            ],
+        };
+
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![function],
+        };
+
+        copy_propagate(&mut program).expect("copy propagation should succeed");
+
+        assert!(matches!(
+            program.functions[0].blocks[3].terminator,
+            Terminator::Return {
+                value: Some(ValueId(0)),
             }
         ));
     }

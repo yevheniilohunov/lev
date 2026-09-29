@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{
     compiler::error::CompilerError,
-    ir::{IrInstruction, ValueId},
+    ir::{IrInstruction, Terminator, ValueId},
 };
 
 use super::ir::{IrBinaryOp, IrFunction, IrProgram};
@@ -341,6 +341,130 @@ fn constant_propagate_function(function: &mut IrFunction) -> Result<(), Vec<Comp
     Ok(())
 }
 
+pub fn copy_propagate(program: &mut IrProgram) -> Result<(), Vec<CompilerError>> {
+    let mut errors = Vec::new();
+
+    for function in &mut program.functions {
+        if let Err(error) = copy_propagate_function(function) {
+            errors.extend(error);
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+fn copy_propagate_function(function: &mut IrFunction) -> Result<(), Vec<CompilerError>> {
+    for block in &mut function.blocks {
+        let mut copies = HashMap::<ValueId, ValueId>::new();
+
+        for instruction in &mut block.instructions {
+            rewrite_instruction_values(instruction, &copies);
+
+            if let IrInstruction::Copy {
+                destination,
+                source,
+            } = instruction
+            {
+                let source = resolve_copy(*source, &copies);
+                copies.insert(*destination, source);
+            }
+        }
+
+        rewrite_terminator_values(&mut block.terminator, &copies);
+
+        block
+            .instructions
+            .retain(|instruction| !matches!(instruction, IrInstruction::Copy { .. }));
+    }
+
+    Ok(())
+}
+
+fn resolve_copy(value: ValueId, copies: &HashMap<ValueId, ValueId>) -> ValueId {
+    let mut current = value;
+
+    while let Some(&source) = copies.get(&current) {
+        if source == current {
+            break;
+        }
+
+        current = source;
+    }
+
+    current
+}
+
+fn rewrite_instruction_values(instruction: &mut IrInstruction, copies: &HashMap<ValueId, ValueId>) {
+    match instruction {
+        IrInstruction::Copy { source, .. } => {
+            *source = resolve_copy(*source, copies);
+        }
+
+        IrInstruction::StoreLocal { value, .. } => {
+            *value = resolve_copy(*value, copies);
+        }
+
+        IrInstruction::StoreField {
+            receiver, value, ..
+        } => {
+            *receiver = resolve_copy(*receiver, copies);
+            *value = resolve_copy(*value, copies);
+        }
+
+        IrInstruction::LoadField { receiver, .. } => {
+            *receiver = resolve_copy(*receiver, copies);
+        }
+
+        IrInstruction::Binary { left, right, .. } => {
+            *left = resolve_copy(*left, copies);
+            *right = resolve_copy(*right, copies);
+        }
+
+        IrInstruction::Call { arguments, .. } => {
+            for argument in arguments {
+                *argument = resolve_copy(*argument, copies);
+            }
+        }
+
+        IrInstruction::StructCopy { source, .. } => {
+            *source = resolve_copy(*source, copies);
+        }
+
+        IrInstruction::Phi { sources, .. } => {
+            for (_, value) in sources {
+                *value = resolve_copy(*value, copies);
+            }
+        }
+
+        IrInstruction::Parameter { .. }
+        | IrInstruction::ConstInt { .. }
+        | IrInstruction::ConstString { .. }
+        | IrInstruction::ConstBool { .. }
+        | IrInstruction::LoadLocal { .. }
+        | IrInstruction::AllocStruct { .. } => {}
+    }
+}
+
+fn rewrite_terminator_values(terminator: &mut Terminator, copies: &HashMap<ValueId, ValueId>) {
+    match terminator {
+        Terminator::Branch { condition, .. } => {
+            *condition = resolve_copy(*condition, copies);
+        }
+
+        Terminator::Return { value } => {
+            if let Some(value) = value {
+                *value = resolve_copy(*value, copies);
+            }
+        }
+
+        Terminator::Jump(_) | Terminator::Unreachable => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -349,7 +473,7 @@ mod tests {
         BasicBlock, IrFunction, IrInstruction, IrProgram, IrType, Terminator, ValueId,
     };
     use crate::ir::BlockId;
-    use crate::semantic::symbols::FunctionId;
+    use crate::semantic::symbols::{FunctionId, LocalId};
 
     fn function_with_unreachable_block() -> IrFunction {
         IrFunction {
@@ -969,6 +1093,66 @@ mod tests {
             IrInstruction::ConstInt {
                 destination: ValueId(3),
                 value: 30,
+            }
+        ));
+    }
+
+    #[test]
+    fn propagates_copy_into_binary_instruction() {
+        let function = IrFunction {
+            id: Some(FunctionId(0)),
+            name: "copy_propagation_test".to_string(),
+            owner: None,
+            parameters: Vec::new(),
+            locals: Vec::new(),
+            return_type: IrType::Int,
+            entry: BlockId(0),
+            blocks: vec![BasicBlock {
+                id: BlockId(0),
+                instructions: vec![
+                    IrInstruction::Parameter {
+                        destination: ValueId(0),
+                        local: LocalId(0),
+                    },
+                    IrInstruction::Copy {
+                        destination: ValueId(1),
+                        source: ValueId(0),
+                    },
+                    IrInstruction::ConstInt {
+                        destination: ValueId(2),
+                        value: 10,
+                    },
+                    IrInstruction::Binary {
+                        destination: ValueId(3),
+                        op: IrBinaryOp::Add,
+                        left: ValueId(1),
+                        right: ValueId(2),
+                    },
+                ],
+                terminator: Terminator::Return {
+                    value: Some(ValueId(3)),
+                },
+            }],
+        };
+
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![function],
+        };
+
+        copy_propagate(&mut program).expect("copy propagation should succeed");
+
+        let instructions = &program.functions[0].blocks[0].instructions;
+
+        assert_eq!(instructions.len(), 3);
+
+        assert!(matches!(
+            instructions[2],
+            IrInstruction::Binary {
+                destination: ValueId(3),
+                op: IrBinaryOp::Add,
+                left: ValueId(0),
+                right: ValueId(2),
             }
         ));
     }

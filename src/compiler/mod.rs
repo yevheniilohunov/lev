@@ -209,4 +209,72 @@ mod tests {
             )
         }));
     }
+
+    #[test]
+    fn compile_propagates_folds_and_removes_dead_constants() {
+        let source = r#"
+        fn main(): int {
+            let x: int = 10;
+            let y: int = 20;
+            return x + y;
+        }
+    "#;
+
+        let program =
+            crate::compiler::compile(source).expect("program should compile successfully");
+
+        let main = program
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .expect("main function should exist");
+
+        let instructions = main
+            .blocks
+            .iter()
+            .flat_map(|block| block.instructions.iter())
+            .collect::<Vec<_>>();
+
+        let returned_value = match &main.blocks[0].terminator {
+            crate::ir::Terminator::Return { value } => value.expect("main should return a value"),
+            other => panic!("expected Return terminator, got {other:?}"),
+        };
+
+        // Constant propagation + folding should produce 30.
+        assert!(instructions.iter().any(|instruction| {
+            matches!(
+                instruction,
+                crate::ir::IrInstruction::ConstInt {
+                    destination,
+                    value: 30,
+                } if *destination == returned_value
+            )
+        }));
+
+        // DCE should remove the original constants after folding.
+        assert!(!instructions.iter().any(|instruction| {
+            matches!(
+                instruction,
+                crate::ir::IrInstruction::ConstInt { value: 10, .. }
+            )
+        }));
+
+        assert!(!instructions.iter().any(|instruction| {
+            matches!(
+                instruction,
+                crate::ir::IrInstruction::ConstInt { value: 20, .. }
+            )
+        }));
+
+        // The final expression should no longer be a Binary instruction.
+        assert!(!instructions.iter().any(|instruction| {
+            matches!(
+                instruction,
+                crate::ir::IrInstruction::Binary {
+                    op: crate::ir::IrBinaryOp::Add,
+                    ..
+                }
+            )
+        }));
+    }
 }

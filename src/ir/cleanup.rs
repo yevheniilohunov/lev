@@ -1810,6 +1810,55 @@ fn eliminate_redundant_loads_function(function: &mut IrFunction) -> Result<(), V
     Ok(())
 }
 
+pub fn eliminate_dead_stores(program: &mut IrProgram) -> Result<(), Vec<CompilerError>> {
+    let mut errors = Vec::new();
+
+    for function in &mut program.functions {
+        if let Err(error) = eliminate_dead_stores_function(function) {
+            errors.extend(error);
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+fn eliminate_dead_stores_function(function: &mut IrFunction) -> Result<(), Vec<CompilerError>> {
+    for block in &mut function.blocks {
+        let mut pending_stores = HashMap::<LocalId, usize>::new();
+        let mut remove = HashSet::<usize>::new();
+
+        for (index, instruction) in block.instructions.iter().enumerate() {
+            match instruction {
+                IrInstruction::StoreLocal { local, .. } => {
+                    if let Some(previous) = pending_stores.insert(*local, index) {
+                        remove.insert(previous);
+                    }
+                }
+
+                IrInstruction::LoadLocal { local, .. } => {
+                    pending_stores.remove(local);
+                }
+
+                _ => {}
+            }
+        }
+
+        let mut index = 0;
+
+        block.instructions.retain(|_| {
+            let keep = !remove.contains(&index);
+            index += 1;
+            keep
+        });
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4632,6 +4681,118 @@ mod tests {
             IrInstruction::LoadLocal {
                 destination: ValueId(2),
                 local: LocalId(0),
+            }
+        ));
+    }
+
+    #[test]
+    fn eliminates_overwritten_store() {
+        let function = IrFunction {
+            id: Some(FunctionId(0)),
+            name: "test".to_string(),
+            owner: None,
+            parameters: Vec::new(),
+            locals: Vec::new(),
+            return_type: IrType::Int,
+            entry: BlockId(0),
+            blocks: vec![BasicBlock {
+                id: BlockId(0),
+                instructions: vec![
+                    IrInstruction::ConstInt {
+                        destination: ValueId(0),
+                        value: 10,
+                    },
+                    IrInstruction::StoreLocal {
+                        local: LocalId(0),
+                        value: ValueId(0),
+                    },
+                    IrInstruction::ConstInt {
+                        destination: ValueId(1),
+                        value: 20,
+                    },
+                    IrInstruction::StoreLocal {
+                        local: LocalId(0),
+                        value: ValueId(1),
+                    },
+                ],
+                terminator: Terminator::Return { value: None },
+            }],
+        };
+
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![function],
+        };
+
+        eliminate_dead_stores(&mut program).unwrap();
+
+        let function = &program.functions[0];
+
+        assert_eq!(function.blocks[0].instructions.len(), 3);
+
+        assert!(matches!(
+            &function.blocks[0].instructions[1],
+            IrInstruction::ConstInt {
+                destination: ValueId(1),
+                value: 20,
+            }
+        ));
+
+        assert!(matches!(
+            &function.blocks[0].instructions[2],
+            IrInstruction::StoreLocal {
+                local: LocalId(0),
+                value: ValueId(1),
+            }
+        ));
+    }
+
+    #[test]
+    fn preserves_store_observed_by_load() {
+        let function = IrFunction {
+            id: Some(FunctionId(0)),
+            name: "test".to_string(),
+            owner: None,
+            parameters: Vec::new(),
+            locals: Vec::new(),
+            return_type: IrType::Int,
+            entry: BlockId(0),
+            blocks: vec![BasicBlock {
+                id: BlockId(0),
+                instructions: vec![
+                    IrInstruction::ConstInt {
+                        destination: ValueId(0),
+                        value: 10,
+                    },
+                    IrInstruction::StoreLocal {
+                        local: LocalId(0),
+                        value: ValueId(0),
+                    },
+                    IrInstruction::LoadLocal {
+                        destination: ValueId(1),
+                        local: LocalId(0),
+                    },
+                ],
+                terminator: Terminator::Return {
+                    value: Some(ValueId(1)),
+                },
+            }],
+        };
+
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![function],
+        };
+
+        eliminate_dead_stores(&mut program).unwrap();
+
+        let function = &program.functions[0];
+
+        assert!(matches!(
+            &function.blocks[0].instructions[1],
+            IrInstruction::StoreLocal {
+                local: LocalId(0),
+                value: ValueId(0),
             }
         ));
     }

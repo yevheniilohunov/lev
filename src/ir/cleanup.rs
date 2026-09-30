@@ -309,36 +309,152 @@ pub fn constant_propagate(program: &mut IrProgram) -> Result<(), Vec<CompilerErr
 }
 
 fn constant_propagate_function(function: &mut IrFunction) -> Result<(), Vec<CompilerError>> {
-    let mut constants = HashMap::<ValueId, i64>::new();
+    let predecessors = build_predecessors(function);
 
+    let mut in_facts = HashMap::<BlockId, HashMap<ValueId, i64>>::new();
+    let mut out_facts = HashMap::<BlockId, HashMap<ValueId, i64>>::new();
+
+    // The entry block has no incoming constant facts.
+    in_facts.insert(function.entry, HashMap::new());
+
+    // Compute the conservative fixed point.
+    //
+    // A constant is propagated into a block only when every predecessor
+    // agrees on the same constant value.
+    loop {
+        let mut changed = false;
+
+        for block in &function.blocks {
+            let block_id = block.id;
+
+            let new_in = if block_id == function.entry {
+                HashMap::new()
+            } else {
+                let preds = predecessors.get(&block_id).cloned().unwrap_or_default();
+
+                if preds.is_empty() {
+                    HashMap::new()
+                } else {
+                    intersect_constant_facts(&preds, &out_facts)
+                }
+            };
+
+            if in_facts.get(&block_id) != Some(&new_in) {
+                in_facts.insert(block_id, new_in.clone());
+                changed = true;
+            }
+
+            let mut facts = new_in;
+
+            for instruction in &block.instructions {
+                transfer_constant_fact(instruction, &mut facts);
+            }
+
+            if out_facts.get(&block_id) != Some(&facts) {
+                out_facts.insert(block_id, facts);
+                changed = true;
+            }
+        }
+
+        if !changed {
+            break;
+        }
+    }
+
+    // Rewrite only after the analysis has reached a fixed point.
     for block in &mut function.blocks {
+        let mut facts = in_facts.get(&block.id).cloned().unwrap_or_default();
+
         for instruction in &mut block.instructions {
-            let propagated = match instruction {
+            let replacement = match instruction {
                 IrInstruction::ConstInt { destination, value } => {
-                    constants.insert(*destination, *value);
+                    facts.insert(*destination, *value);
                     None
                 }
 
                 IrInstruction::Copy {
                     destination,
                     source,
-                } => constants
-                    .get(source)
-                    .copied()
-                    .map(|value| (*destination, value)),
+                } => {
+                    if let Some(value) = facts.get(source).copied() {
+                        facts.insert(*destination, value);
 
-                _ => None,
+                        Some(IrInstruction::ConstInt {
+                            destination: *destination,
+                            value,
+                        })
+                    } else {
+                        facts.remove(destination);
+                        None
+                    }
+                }
+
+                _ => {
+                    if let Some(destination) = instruction_destination(instruction) {
+                        facts.remove(&destination);
+                    }
+
+                    None
+                }
             };
 
-            if let Some((destination, value)) = propagated {
-                *instruction = IrInstruction::ConstInt { destination, value };
-
-                constants.insert(destination, value);
+            if let Some(replacement) = replacement {
+                *instruction = replacement;
             }
         }
     }
 
     Ok(())
+}
+
+fn intersect_constant_facts(
+    predecessors: &[BlockId],
+    out_facts: &HashMap<BlockId, HashMap<ValueId, i64>>,
+) -> HashMap<ValueId, i64> {
+    let Some(first) = predecessors.first() else {
+        return HashMap::new();
+    };
+
+    let Some(first_facts) = out_facts.get(first) else {
+        return HashMap::new();
+    };
+
+    let mut result = first_facts.clone();
+
+    for predecessor in &predecessors[1..] {
+        let Some(facts) = out_facts.get(predecessor) else {
+            return HashMap::new();
+        };
+
+        result.retain(|value, constant| facts.get(value) == Some(constant));
+    }
+
+    result
+}
+
+fn transfer_constant_fact(instruction: &IrInstruction, facts: &mut HashMap<ValueId, i64>) {
+    match instruction {
+        IrInstruction::ConstInt { destination, value } => {
+            facts.insert(*destination, *value);
+        }
+
+        IrInstruction::Copy {
+            destination,
+            source,
+        } => {
+            if let Some(value) = facts.get(source).copied() {
+                facts.insert(*destination, value);
+            } else {
+                facts.remove(destination);
+            }
+        }
+
+        _ => {
+            if let Some(destination) = instruction_destination(instruction) {
+                facts.remove(&destination);
+            }
+        }
+    }
 }
 
 pub fn copy_propagate(program: &mut IrProgram) -> Result<(), Vec<CompilerError>> {
@@ -1402,6 +1518,146 @@ mod tests {
             program.functions[0].blocks[3].terminator,
             Terminator::Return {
                 value: Some(ValueId(0)),
+            }
+        ));
+    }
+
+    #[test]
+    fn propagates_constant_when_all_predecessors_agree() {
+        let function = IrFunction {
+            id: Some(FunctionId(0)),
+            name: "cfg_constant_test".to_string(),
+            owner: None,
+            parameters: Vec::new(),
+            locals: Vec::new(),
+            return_type: IrType::Int,
+            entry: BlockId(0),
+            blocks: vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    instructions: vec![IrInstruction::Parameter {
+                        destination: ValueId(0),
+                        local: LocalId(0),
+                    }],
+                    terminator: Terminator::Branch {
+                        condition: ValueId(0),
+                        then_block: BlockId(1),
+                        else_block: BlockId(2),
+                    },
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    instructions: vec![IrInstruction::ConstInt {
+                        destination: ValueId(2),
+                        value: 42,
+                    }],
+                    terminator: Terminator::Jump(BlockId(3)),
+                },
+                BasicBlock {
+                    id: BlockId(2),
+                    instructions: vec![IrInstruction::ConstInt {
+                        destination: ValueId(2),
+                        value: 42,
+                    }],
+                    terminator: Terminator::Jump(BlockId(3)),
+                },
+                BasicBlock {
+                    id: BlockId(3),
+                    instructions: vec![IrInstruction::Copy {
+                        destination: ValueId(3),
+                        source: ValueId(2),
+                    }],
+                    terminator: Terminator::Return {
+                        value: Some(ValueId(3)),
+                    },
+                },
+            ],
+        };
+
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![function],
+        };
+
+        constant_propagate(&mut program).expect("constant propagation should succeed");
+
+        let instructions = &program.functions[0].blocks[3].instructions;
+
+        assert!(matches!(
+            instructions[0],
+            IrInstruction::ConstInt {
+                destination: ValueId(3),
+                value: 42,
+            }
+        ));
+    }
+
+    #[test]
+    fn does_not_propagate_constant_when_predecessors_disagree() {
+        let function = IrFunction {
+            id: Some(FunctionId(0)),
+            name: "cfg_constant_test".to_string(),
+            owner: None,
+            parameters: Vec::new(),
+            locals: Vec::new(),
+            return_type: IrType::Int,
+            entry: BlockId(0),
+            blocks: vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    instructions: vec![IrInstruction::Parameter {
+                        destination: ValueId(0),
+                        local: LocalId(0),
+                    }],
+                    terminator: Terminator::Branch {
+                        condition: ValueId(0),
+                        then_block: BlockId(1),
+                        else_block: BlockId(2),
+                    },
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    instructions: vec![IrInstruction::ConstInt {
+                        destination: ValueId(2),
+                        value: 42,
+                    }],
+                    terminator: Terminator::Jump(BlockId(3)),
+                },
+                BasicBlock {
+                    id: BlockId(2),
+                    instructions: vec![IrInstruction::ConstInt {
+                        destination: ValueId(2),
+                        value: 99,
+                    }],
+                    terminator: Terminator::Jump(BlockId(3)),
+                },
+                BasicBlock {
+                    id: BlockId(3),
+                    instructions: vec![IrInstruction::Copy {
+                        destination: ValueId(3),
+                        source: ValueId(2),
+                    }],
+                    terminator: Terminator::Return {
+                        value: Some(ValueId(3)),
+                    },
+                },
+            ],
+        };
+
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![function],
+        };
+
+        constant_propagate(&mut program).expect("constant propagation should succeed");
+
+        let instructions = &program.functions[0].blocks[3].instructions;
+
+        assert!(matches!(
+            instructions[0],
+            IrInstruction::Copy {
+                destination: ValueId(3),
+                source: ValueId(2),
             }
         ));
     }

@@ -38,6 +38,8 @@ pub fn compile(source: &str) -> Result<ir::IrProgram, Vec<CompilerError>> {
 
     ir::cleanup::remove_empty_blocks(&mut ir)?;
 
+    ir::cleanup::merge_linear_blocks(&mut ir)?;
+
     // Validate the cleaned non-SSA IR.
     ir::validate(&ir)?;
 

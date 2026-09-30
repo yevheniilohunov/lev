@@ -1827,20 +1827,101 @@ pub fn eliminate_dead_stores(program: &mut IrProgram) -> Result<(), Vec<Compiler
 }
 
 fn eliminate_dead_stores_function(function: &mut IrFunction) -> Result<(), Vec<CompilerError>> {
-    for block in &mut function.blocks {
-        let mut pending_stores = HashMap::<LocalId, usize>::new();
-        let mut remove = HashSet::<usize>::new();
+    let mut successors = HashMap::<BlockId, Vec<BlockId>>::new();
 
-        for (index, instruction) in block.instructions.iter().enumerate() {
-            match instruction {
-                IrInstruction::StoreLocal { local, .. } => {
-                    if let Some(previous) = pending_stores.insert(*local, index) {
-                        remove.insert(previous);
+    for block in &function.blocks {
+        let targets = match block.terminator {
+            Terminator::Jump(destination) => vec![destination],
+
+            Terminator::Branch {
+                then_block,
+                else_block,
+                ..
+            } => {
+                if then_block == else_block {
+                    vec![then_block]
+                } else {
+                    vec![then_block, else_block]
+                }
+            }
+
+            Terminator::Return { .. } | Terminator::Unreachable => Vec::new(),
+        };
+
+        successors.insert(block.id, targets);
+    }
+
+    let mut live_in = HashMap::<BlockId, HashSet<LocalId>>::new();
+    let mut live_out = HashMap::<BlockId, HashSet<LocalId>>::new();
+
+    for block in &function.blocks {
+        live_in.insert(block.id, HashSet::new());
+        live_out.insert(block.id, HashSet::new());
+    }
+
+    loop {
+        let mut changed = false;
+
+        for block in function.blocks.iter().rev() {
+            let mut new_live_out = HashSet::new();
+
+            if let Some(block_successors) = successors.get(&block.id) {
+                for successor in block_successors {
+                    if let Some(successor_live_in) = live_in.get(successor) {
+                        new_live_out.extend(successor_live_in);
                     }
                 }
+            }
 
+            let mut live = new_live_out.clone();
+
+            for instruction in block.instructions.iter().rev() {
+                match instruction {
+                    IrInstruction::LoadLocal { local, .. } => {
+                        live.insert(*local);
+                    }
+
+                    IrInstruction::StoreLocal { local, .. } => {
+                        live.remove(local);
+                    }
+
+                    _ => {}
+                }
+            }
+
+            if live_out.get(&block.id) != Some(&new_live_out) {
+                live_out.insert(block.id, new_live_out);
+                changed = true;
+            }
+
+            if live_in.get(&block.id) != Some(&live) {
+                live_in.insert(block.id, live);
+                changed = true;
+            }
+        }
+
+        if !changed {
+            break;
+        }
+    }
+
+    for block in &mut function.blocks {
+        let mut live = live_out.get(&block.id).cloned().unwrap_or_default();
+
+        let mut remove = HashSet::<usize>::new();
+
+        for (index, instruction) in block.instructions.iter().enumerate().rev() {
+            match instruction {
                 IrInstruction::LoadLocal { local, .. } => {
-                    pending_stores.remove(local);
+                    live.insert(*local);
+                }
+
+                IrInstruction::StoreLocal { local, .. } => {
+                    if live.contains(local) {
+                        live.remove(local);
+                    } else {
+                        remove.insert(index);
+                    }
                 }
 
                 _ => {}
@@ -1855,6 +1936,79 @@ fn eliminate_dead_stores_function(function: &mut IrFunction) -> Result<(), Vec<C
             keep
         });
     }
+
+    Ok(())
+}
+
+pub fn merge_linear_blocks(program: &mut IrProgram) -> Result<(), Vec<CompilerError>> {
+    let mut errors = Vec::new();
+
+    for function in &mut program.functions {
+        if let Err(error) = merge_linear_blocks_function(function) {
+            errors.extend(error);
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+fn merge_linear_blocks_function(function: &mut IrFunction) -> Result<(), Vec<CompilerError>> {
+    loop {
+        let predecessors = build_predecessors(function);
+
+        let Some((source, destination)) = function.blocks.iter().find_map(|block| {
+            let destination = match block.terminator {
+                Terminator::Jump(destination) => destination,
+                _ => return None,
+            };
+
+            if destination == block.id || destination == function.entry {
+                return None;
+            }
+
+            let destination_predecessors = predecessors.get(&destination)?;
+
+            if destination_predecessors.len() == 1 && destination_predecessors[0] == block.id {
+                Some((block.id, destination))
+            } else {
+                None
+            }
+        }) else {
+            break;
+        };
+
+        let source_index = function
+            .blocks
+            .iter()
+            .position(|block| block.id == source)
+            .expect("source block must exist");
+
+        let destination_index = function
+            .blocks
+            .iter()
+            .position(|block| block.id == destination)
+            .expect("destination block must exist");
+
+        let destination_block = function.blocks.remove(destination_index);
+
+        let source_index = function
+            .blocks
+            .iter()
+            .position(|block| block.id == source)
+            .expect("source block must still exist");
+
+        function.blocks[source_index]
+            .instructions
+            .extend(destination_block.instructions);
+
+        function.blocks[source_index].terminator = destination_block.terminator;
+    }
+
+    renumber_blocks(function);
 
     Ok(())
 }
@@ -4714,8 +4868,14 @@ mod tests {
                         local: LocalId(0),
                         value: ValueId(1),
                     },
+                    IrInstruction::LoadLocal {
+                        destination: ValueId(2),
+                        local: LocalId(0),
+                    },
                 ],
-                terminator: Terminator::Return { value: None },
+                terminator: Terminator::Return {
+                    value: Some(ValueId(2)),
+                },
             }],
         };
 
@@ -4728,7 +4888,15 @@ mod tests {
 
         let function = &program.functions[0];
 
-        assert_eq!(function.blocks[0].instructions.len(), 3);
+        assert_eq!(function.blocks[0].instructions.len(), 4);
+
+        assert!(matches!(
+            &function.blocks[0].instructions[0],
+            IrInstruction::ConstInt {
+                destination: ValueId(0),
+                value: 10,
+            }
+        ));
 
         assert!(matches!(
             &function.blocks[0].instructions[1],
@@ -4743,6 +4911,14 @@ mod tests {
             IrInstruction::StoreLocal {
                 local: LocalId(0),
                 value: ValueId(1),
+            }
+        ));
+
+        assert!(matches!(
+            &function.blocks[0].instructions[3],
+            IrInstruction::LoadLocal {
+                destination: ValueId(2),
+                local: LocalId(0),
             }
         ));
     }
@@ -4795,5 +4971,278 @@ mod tests {
                 value: ValueId(0),
             }
         ));
+    }
+
+    #[test]
+    fn preserves_store_when_successor_loads_local() {
+        let function = IrFunction {
+            id: Some(FunctionId(0)),
+            name: "test".to_string(),
+            owner: None,
+            parameters: Vec::new(),
+            locals: Vec::new(),
+            return_type: IrType::Int,
+            entry: BlockId(0),
+            blocks: vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    instructions: vec![
+                        IrInstruction::ConstInt {
+                            destination: ValueId(0),
+                            value: 42,
+                        },
+                        IrInstruction::StoreLocal {
+                            local: LocalId(0),
+                            value: ValueId(0),
+                        },
+                    ],
+                    terminator: Terminator::Jump(BlockId(1)),
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    instructions: vec![IrInstruction::LoadLocal {
+                        destination: ValueId(1),
+                        local: LocalId(0),
+                    }],
+                    terminator: Terminator::Return {
+                        value: Some(ValueId(1)),
+                    },
+                },
+            ],
+        };
+
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![function],
+        };
+
+        eliminate_dead_stores(&mut program).unwrap();
+
+        let function = &program.functions[0];
+
+        assert!(matches!(
+            &function.blocks[0].instructions[1],
+            IrInstruction::StoreLocal {
+                local: LocalId(0),
+                value: ValueId(0),
+            }
+        ));
+    }
+
+    #[test]
+    fn preserves_stores_when_join_loads_local() {
+        let function = IrFunction {
+            id: Some(FunctionId(0)),
+            name: "test".to_string(),
+            owner: None,
+            parameters: Vec::new(),
+            locals: Vec::new(),
+            return_type: IrType::Int,
+            entry: BlockId(0),
+            blocks: vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    instructions: vec![IrInstruction::ConstBool {
+                        destination: ValueId(0),
+                        value: true,
+                    }],
+                    terminator: Terminator::Branch {
+                        condition: ValueId(0),
+                        then_block: BlockId(1),
+                        else_block: BlockId(2),
+                    },
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    instructions: vec![
+                        IrInstruction::ConstInt {
+                            destination: ValueId(1),
+                            value: 10,
+                        },
+                        IrInstruction::StoreLocal {
+                            local: LocalId(0),
+                            value: ValueId(1),
+                        },
+                    ],
+                    terminator: Terminator::Jump(BlockId(3)),
+                },
+                BasicBlock {
+                    id: BlockId(2),
+                    instructions: vec![
+                        IrInstruction::ConstInt {
+                            destination: ValueId(2),
+                            value: 20,
+                        },
+                        IrInstruction::StoreLocal {
+                            local: LocalId(0),
+                            value: ValueId(2),
+                        },
+                    ],
+                    terminator: Terminator::Jump(BlockId(3)),
+                },
+                BasicBlock {
+                    id: BlockId(3),
+                    instructions: vec![IrInstruction::LoadLocal {
+                        destination: ValueId(3),
+                        local: LocalId(0),
+                    }],
+                    terminator: Terminator::Return {
+                        value: Some(ValueId(3)),
+                    },
+                },
+            ],
+        };
+
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![function],
+        };
+
+        eliminate_dead_stores(&mut program).unwrap();
+
+        let function = &program.functions[0];
+
+        assert!(matches!(
+            &function.blocks[1].instructions[1],
+            IrInstruction::StoreLocal {
+                local: LocalId(0),
+                value: ValueId(1),
+            }
+        ));
+
+        assert!(matches!(
+            &function.blocks[2].instructions[1],
+            IrInstruction::StoreLocal {
+                local: LocalId(0),
+                value: ValueId(2),
+            }
+        ));
+    }
+
+    #[test]
+    fn merges_linear_blocks() {
+        let function = IrFunction {
+            id: Some(FunctionId(0)),
+            name: "test".to_string(),
+            owner: None,
+            parameters: Vec::new(),
+            locals: Vec::new(),
+            return_type: IrType::Int,
+            entry: BlockId(0),
+            blocks: vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    instructions: vec![IrInstruction::ConstInt {
+                        destination: ValueId(0),
+                        value: 10,
+                    }],
+                    terminator: Terminator::Jump(BlockId(1)),
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    instructions: vec![IrInstruction::ConstInt {
+                        destination: ValueId(1),
+                        value: 20,
+                    }],
+                    terminator: Terminator::Return {
+                        value: Some(ValueId(1)),
+                    },
+                },
+            ],
+        };
+
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![function],
+        };
+
+        merge_linear_blocks(&mut program).unwrap();
+
+        let function = &program.functions[0];
+
+        assert_eq!(function.blocks.len(), 1);
+        assert_eq!(function.blocks[0].id, BlockId(0));
+        assert_eq!(function.blocks[0].instructions.len(), 2);
+
+        assert!(matches!(
+            &function.blocks[0].instructions[0],
+            IrInstruction::ConstInt {
+                destination: ValueId(0),
+                value: 10,
+            }
+        ));
+
+        assert!(matches!(
+            &function.blocks[0].instructions[1],
+            IrInstruction::ConstInt {
+                destination: ValueId(1),
+                value: 20,
+            }
+        ));
+
+        assert!(matches!(
+            function.blocks[0].terminator,
+            Terminator::Return {
+                value: Some(ValueId(1)),
+            }
+        ));
+    }
+
+    #[test]
+    fn does_not_merge_block_with_multiple_predecessors() {
+        let function = IrFunction {
+            id: Some(FunctionId(0)),
+            name: "test".to_string(),
+            owner: None,
+            parameters: Vec::new(),
+            locals: Vec::new(),
+            return_type: IrType::Int,
+            entry: BlockId(0),
+            blocks: vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    instructions: vec![IrInstruction::ConstBool {
+                        destination: ValueId(0),
+                        value: true,
+                    }],
+                    terminator: Terminator::Branch {
+                        condition: ValueId(0),
+                        then_block: BlockId(1),
+                        else_block: BlockId(2),
+                    },
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    instructions: Vec::new(),
+                    terminator: Terminator::Jump(BlockId(3)),
+                },
+                BasicBlock {
+                    id: BlockId(2),
+                    instructions: Vec::new(),
+                    terminator: Terminator::Jump(BlockId(3)),
+                },
+                BasicBlock {
+                    id: BlockId(3),
+                    instructions: vec![IrInstruction::ConstInt {
+                        destination: ValueId(1),
+                        value: 42,
+                    }],
+                    terminator: Terminator::Return {
+                        value: Some(ValueId(1)),
+                    },
+                },
+            ],
+        };
+
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![function],
+        };
+
+        merge_linear_blocks(&mut program).unwrap();
+
+        let function = &program.functions[0];
+
+        assert_eq!(function.blocks.len(), 4);
     }
 }

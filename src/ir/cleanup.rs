@@ -2066,6 +2066,296 @@ fn merge_linear_blocks_function(function: &mut IrFunction) -> Result<(), Vec<Com
     Ok(())
 }
 
+pub fn eliminate_redundant_field_loads(program: &mut IrProgram) -> Result<(), Vec<CompilerError>> {
+    let mut errors = Vec::new();
+
+    for function in &mut program.functions {
+        if let Err(error) = eliminate_redundant_field_loads_function(function) {
+            errors.extend(error);
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+fn eliminate_redundant_field_loads_function(
+    function: &mut IrFunction,
+) -> Result<(), Vec<CompilerError>> {
+    let predecessors = build_predecessors(function);
+
+    type FieldKey = (ValueId, usize);
+    type FieldFacts = HashMap<FieldKey, ValueId>;
+
+    let mut in_facts = HashMap::<BlockId, FieldFacts>::new();
+    let mut out_facts = HashMap::<BlockId, FieldFacts>::new();
+
+    in_facts.insert(function.entry, HashMap::new());
+
+    // Compute the facts available at the entry and exit of every block.
+    loop {
+        let mut changed = false;
+
+        for block in &function.blocks {
+            let block_id = block.id;
+
+            let new_in = if block_id == function.entry {
+                HashMap::new()
+            } else {
+                let preds = predecessors.get(&block_id).cloned().unwrap_or_default();
+
+                if preds.is_empty() {
+                    HashMap::new()
+                } else {
+                    intersect_field_facts(&preds, &out_facts)
+                }
+            };
+
+            if in_facts.get(&block_id) != Some(&new_in) {
+                in_facts.insert(block_id, new_in.clone());
+                changed = true;
+            }
+
+            let mut facts = new_in;
+
+            for instruction in &block.instructions {
+                match instruction {
+                    IrInstruction::LoadField {
+                        destination,
+                        receiver,
+                        field,
+                    } => {
+                        facts.insert((*receiver, *field), *destination);
+                    }
+
+                    IrInstruction::StoreField {
+                        receiver, field, ..
+                    } => {
+                        facts.remove(&(*receiver, *field));
+                    }
+
+                    IrInstruction::Call { .. } => {
+                        // A call may mutate any object.
+                        facts.clear();
+                    }
+
+                    _ => {}
+                }
+            }
+
+            if out_facts.get(&block_id) != Some(&facts) {
+                out_facts.insert(block_id, facts);
+                changed = true;
+            }
+        }
+
+        if !changed {
+            break;
+        }
+    }
+
+    // Rewrite loads using the facts available at each block.
+    for block in &mut function.blocks {
+        let mut facts = in_facts.get(&block.id).cloned().unwrap_or_default();
+
+        for instruction in &mut block.instructions {
+            match instruction {
+                IrInstruction::LoadField {
+                    destination,
+                    receiver,
+                    field,
+                } => {
+                    let destination_id = *destination;
+                    let key = (*receiver, *field);
+
+                    if let Some(source) = facts.get(&key).copied() {
+                        *instruction = IrInstruction::Copy {
+                            destination: destination_id,
+                            source,
+                        };
+                    } else {
+                        facts.insert(key, destination_id);
+                    }
+                }
+
+                IrInstruction::StoreField {
+                    receiver, field, ..
+                } => {
+                    facts.remove(&(*receiver, *field));
+                }
+
+                IrInstruction::Call { .. } => {
+                    facts.clear();
+                }
+
+                _ => {}
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn intersect_field_facts(
+    predecessors: &[BlockId],
+    out_facts: &HashMap<BlockId, HashMap<(ValueId, usize), ValueId>>,
+) -> HashMap<(ValueId, usize), ValueId> {
+    let Some(first) = predecessors.first() else {
+        return HashMap::new();
+    };
+
+    let Some(first_facts) = out_facts.get(first) else {
+        return HashMap::new();
+    };
+
+    let mut result = first_facts.clone();
+
+    for predecessor in &predecessors[1..] {
+        let Some(facts) = out_facts.get(predecessor) else {
+            result.clear();
+            break;
+        };
+
+        result.retain(|key, value| facts.get(key) == Some(value));
+    }
+
+    result
+}
+
+pub fn forward_field_stores(program: &mut IrProgram) -> Result<(), Vec<CompilerError>> {
+    let mut errors = Vec::new();
+
+    for function in &mut program.functions {
+        if let Err(error) = forward_field_stores_function(function) {
+            errors.extend(error);
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+fn forward_field_stores_function(function: &mut IrFunction) -> Result<(), Vec<CompilerError>> {
+    let predecessors = build_predecessors(function);
+
+    type FieldKey = (ValueId, usize);
+    type FieldFacts = HashMap<FieldKey, ValueId>;
+
+    let mut in_facts = HashMap::<BlockId, FieldFacts>::new();
+    let mut out_facts = HashMap::<BlockId, FieldFacts>::new();
+
+    in_facts.insert(function.entry, HashMap::new());
+
+    // Compute the field values known at every block boundary.
+    loop {
+        let mut changed = false;
+
+        for block in &function.blocks {
+            let block_id = block.id;
+
+            let new_in = if block_id == function.entry {
+                HashMap::new()
+            } else {
+                let preds = predecessors.get(&block_id).cloned().unwrap_or_default();
+
+                if preds.is_empty() {
+                    HashMap::new()
+                } else {
+                    intersect_field_facts(&preds, &out_facts)
+                }
+            };
+
+            if in_facts.get(&block_id) != Some(&new_in) {
+                in_facts.insert(block_id, new_in.clone());
+                changed = true;
+            }
+
+            let mut facts = new_in;
+
+            for instruction in &block.instructions {
+                match instruction {
+                    IrInstruction::StoreField {
+                        receiver,
+                        field,
+                        value,
+                    } => {
+                        facts.insert((*receiver, *field), *value);
+                    }
+
+                    IrInstruction::LoadField { .. } => {}
+
+                    IrInstruction::Call { .. } => {
+                        // Calls may mutate arbitrary objects.
+                        facts.clear();
+                    }
+
+                    _ => {}
+                }
+            }
+
+            if out_facts.get(&block_id) != Some(&facts) {
+                out_facts.insert(block_id, facts);
+                changed = true;
+            }
+        }
+
+        if !changed {
+            break;
+        }
+    }
+
+    // Forward stores into subsequent loads.
+    for block in &mut function.blocks {
+        let mut facts = in_facts.get(&block.id).cloned().unwrap_or_default();
+
+        for instruction in &mut block.instructions {
+            match instruction {
+                IrInstruction::LoadField {
+                    destination,
+                    receiver,
+                    field,
+                } => {
+                    let destination_id = *destination;
+                    let key = (*receiver, *field);
+
+                    if let Some(source) = facts.get(&key).copied() {
+                        *instruction = IrInstruction::Copy {
+                            destination: destination_id,
+                            source,
+                        };
+                    } else {
+                        // Do not cache this load here. The dedicated
+                        // redundant-field-load pass handles load caching.
+                        facts.remove(&key);
+                    }
+                }
+
+                IrInstruction::StoreField {
+                    receiver,
+                    field,
+                    value,
+                } => {
+                    facts.insert((*receiver, *field), *value);
+                }
+
+                IrInstruction::Call { .. } => {
+                    facts.clear();
+                }
+
+                _ => {}
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2074,7 +2364,184 @@ mod tests {
         BasicBlock, IrFunction, IrInstruction, IrProgram, IrType, Terminator, ValueId,
     };
     use crate::ir::{BlockId, IrLocal};
-    use crate::semantic::symbols::{FunctionId, LocalId};
+    use crate::semantic::symbols::{FunctionId, LocalId, StructId};
+
+    #[test]
+    fn forwards_field_store_into_load() {
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![IrFunction {
+                id: None,
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Int,
+                entry: BlockId(0),
+                blocks: vec![BasicBlock {
+                    id: BlockId(0),
+                    instructions: vec![
+                        IrInstruction::AllocStruct {
+                            destination: ValueId(0),
+                            struct_id: StructId(0),
+                        },
+                        IrInstruction::ConstInt {
+                            destination: ValueId(1),
+                            value: 42,
+                        },
+                        IrInstruction::StoreField {
+                            receiver: ValueId(0),
+                            field: 0,
+                            value: ValueId(1),
+                        },
+                        IrInstruction::LoadField {
+                            destination: ValueId(2),
+                            receiver: ValueId(0),
+                            field: 0,
+                        },
+                    ],
+                    terminator: Terminator::Return {
+                        value: Some(ValueId(2)),
+                    },
+                }],
+            }],
+        };
+
+        forward_field_stores(&mut program).expect("optimization should succeed");
+
+        let instructions = &program.functions[0].blocks[0].instructions;
+
+        assert!(matches!(
+            &instructions[3],
+            IrInstruction::Copy {
+                destination: ValueId(2),
+                source: ValueId(1),
+            }
+        ));
+    }
+
+    #[test]
+    fn does_not_forward_field_store_after_overwrite() {
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![IrFunction {
+                id: None,
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Int,
+                entry: BlockId(0),
+                blocks: vec![BasicBlock {
+                    id: BlockId(0),
+                    instructions: vec![
+                        IrInstruction::AllocStruct {
+                            destination: ValueId(0),
+                            struct_id: StructId(0),
+                        },
+                        IrInstruction::ConstInt {
+                            destination: ValueId(1),
+                            value: 10,
+                        },
+                        IrInstruction::ConstInt {
+                            destination: ValueId(2),
+                            value: 20,
+                        },
+                        IrInstruction::StoreField {
+                            receiver: ValueId(0),
+                            field: 0,
+                            value: ValueId(1),
+                        },
+                        IrInstruction::StoreField {
+                            receiver: ValueId(0),
+                            field: 0,
+                            value: ValueId(2),
+                        },
+                        IrInstruction::LoadField {
+                            destination: ValueId(3),
+                            receiver: ValueId(0),
+                            field: 0,
+                        },
+                    ],
+                    terminator: Terminator::Return {
+                        value: Some(ValueId(3)),
+                    },
+                }],
+            }],
+        };
+
+        forward_field_stores(&mut program).expect("optimization should succeed");
+
+        let instructions = &program.functions[0].blocks[0].instructions;
+
+        assert!(matches!(
+            &instructions[5],
+            IrInstruction::Copy {
+                destination: ValueId(3),
+                source: ValueId(2),
+            }
+        ));
+    }
+
+    #[test]
+    fn does_not_forward_field_store_across_call() {
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![IrFunction {
+                id: None,
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Int,
+                entry: BlockId(0),
+                blocks: vec![BasicBlock {
+                    id: BlockId(0),
+                    instructions: vec![
+                        IrInstruction::AllocStruct {
+                            destination: ValueId(0),
+                            struct_id: StructId(0),
+                        },
+                        IrInstruction::ConstInt {
+                            destination: ValueId(1),
+                            value: 42,
+                        },
+                        IrInstruction::StoreField {
+                            receiver: ValueId(0),
+                            field: 0,
+                            value: ValueId(1),
+                        },
+                        IrInstruction::Call {
+                            destination: None,
+                            function: FunctionId(0),
+                            arguments: Vec::new(),
+                        },
+                        IrInstruction::LoadField {
+                            destination: ValueId(2),
+                            receiver: ValueId(0),
+                            field: 0,
+                        },
+                    ],
+                    terminator: Terminator::Return {
+                        value: Some(ValueId(2)),
+                    },
+                }],
+            }],
+        };
+
+        forward_field_stores(&mut program).expect("optimization should succeed");
+
+        let instructions = &program.functions[0].blocks[0].instructions;
+
+        assert!(matches!(
+            &instructions[4],
+            IrInstruction::LoadField {
+                destination: ValueId(2),
+                receiver: ValueId(0),
+                field: 0,
+            }
+        ));
+    }
 
     fn function_with_unreachable_block() -> IrFunction {
         IrFunction {
@@ -5475,5 +5942,401 @@ mod tests {
                 }
             )
         }));
+    }
+
+    #[test]
+    fn eliminates_redundant_field_load() {
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![IrFunction {
+                id: None,
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Int,
+                entry: BlockId(0),
+                blocks: vec![BasicBlock {
+                    id: BlockId(0),
+                    instructions: vec![
+                        IrInstruction::AllocStruct {
+                            destination: ValueId(0),
+                            struct_id: StructId(0),
+                        },
+                        IrInstruction::LoadField {
+                            destination: ValueId(1),
+                            receiver: ValueId(0),
+                            field: 0,
+                        },
+                        IrInstruction::LoadField {
+                            destination: ValueId(2),
+                            receiver: ValueId(0),
+                            field: 0,
+                        },
+                    ],
+                    terminator: Terminator::Return {
+                        value: Some(ValueId(2)),
+                    },
+                }],
+            }],
+        };
+
+        eliminate_redundant_field_loads(&mut program).expect("optimization should succeed");
+
+        let instructions = &program.functions[0].blocks[0].instructions;
+
+        assert!(matches!(
+            &instructions[2],
+            IrInstruction::Copy {
+                destination: ValueId(2),
+                source: ValueId(1),
+            }
+        ));
+    }
+
+    #[test]
+    fn does_not_eliminate_field_load_after_store() {
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![IrFunction {
+                id: None,
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Int,
+                entry: BlockId(0),
+                blocks: vec![BasicBlock {
+                    id: BlockId(0),
+                    instructions: vec![
+                        IrInstruction::AllocStruct {
+                            destination: ValueId(0),
+                            struct_id: StructId(0),
+                        },
+                        IrInstruction::ConstInt {
+                            destination: ValueId(1),
+                            value: 42,
+                        },
+                        IrInstruction::LoadField {
+                            destination: ValueId(2),
+                            receiver: ValueId(0),
+                            field: 0,
+                        },
+                        IrInstruction::StoreField {
+                            receiver: ValueId(0),
+                            field: 0,
+                            value: ValueId(1),
+                        },
+                        IrInstruction::LoadField {
+                            destination: ValueId(3),
+                            receiver: ValueId(0),
+                            field: 0,
+                        },
+                    ],
+                    terminator: Terminator::Return {
+                        value: Some(ValueId(3)),
+                    },
+                }],
+            }],
+        };
+
+        eliminate_redundant_field_loads(&mut program).expect("optimization should succeed");
+
+        let instructions = &program.functions[0].blocks[0].instructions;
+
+        assert!(matches!(
+            &instructions[4],
+            IrInstruction::LoadField {
+                destination: ValueId(3),
+                receiver: ValueId(0),
+                field: 0,
+            }
+        ));
+    }
+
+    #[test]
+    fn does_not_eliminate_load_of_different_field() {
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![IrFunction {
+                id: None,
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Int,
+                entry: BlockId(0),
+                blocks: vec![BasicBlock {
+                    id: BlockId(0),
+                    instructions: vec![
+                        IrInstruction::AllocStruct {
+                            destination: ValueId(0),
+                            struct_id: StructId(0),
+                        },
+                        IrInstruction::LoadField {
+                            destination: ValueId(1),
+                            receiver: ValueId(0),
+                            field: 0,
+                        },
+                        IrInstruction::LoadField {
+                            destination: ValueId(2),
+                            receiver: ValueId(0),
+                            field: 1,
+                        },
+                    ],
+                    terminator: Terminator::Return {
+                        value: Some(ValueId(2)),
+                    },
+                }],
+            }],
+        };
+
+        eliminate_redundant_field_loads(&mut program).expect("optimization should succeed");
+
+        let instructions = &program.functions[0].blocks[0].instructions;
+
+        assert!(matches!(
+            &instructions[2],
+            IrInstruction::LoadField {
+                destination: ValueId(2),
+                receiver: ValueId(0),
+                field: 1,
+            }
+        ));
+    }
+
+    #[test]
+    fn eliminates_redundant_field_load_when_predecessors_agree() {
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![IrFunction {
+                id: None,
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Int,
+                entry: BlockId(0),
+                blocks: vec![
+                    BasicBlock {
+                        id: BlockId(0),
+                        instructions: vec![
+                            IrInstruction::AllocStruct {
+                                destination: ValueId(0),
+                                struct_id: StructId(0),
+                            },
+                            IrInstruction::ConstInt {
+                                destination: ValueId(1),
+                                value: 42,
+                            },
+                        ],
+                        terminator: Terminator::Branch {
+                            condition: ValueId(1),
+                            then_block: BlockId(1),
+                            else_block: BlockId(2),
+                        },
+                    },
+                    BasicBlock {
+                        id: BlockId(1),
+                        instructions: vec![IrInstruction::StoreField {
+                            receiver: ValueId(0),
+                            field: 0,
+                            value: ValueId(1),
+                        }],
+                        terminator: Terminator::Jump(BlockId(3)),
+                    },
+                    BasicBlock {
+                        id: BlockId(2),
+                        instructions: vec![IrInstruction::StoreField {
+                            receiver: ValueId(0),
+                            field: 0,
+                            value: ValueId(1),
+                        }],
+                        terminator: Terminator::Jump(BlockId(3)),
+                    },
+                    BasicBlock {
+                        id: BlockId(3),
+                        instructions: vec![IrInstruction::LoadField {
+                            destination: ValueId(2),
+                            receiver: ValueId(0),
+                            field: 0,
+                        }],
+                        terminator: Terminator::Return {
+                            value: Some(ValueId(2)),
+                        },
+                    },
+                ],
+            }],
+        };
+
+        eliminate_redundant_field_loads(&mut program).expect("optimization should succeed");
+
+        let instructions = &program.functions[0].blocks[3].instructions;
+
+        assert!(matches!(
+            &instructions[0],
+            IrInstruction::LoadField {
+                destination: ValueId(2),
+                receiver: ValueId(0),
+                field: 0,
+            }
+        ));
+    }
+
+    #[test]
+    fn eliminates_redundant_field_load_at_join() {
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![IrFunction {
+                id: None,
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Int,
+                entry: BlockId(0),
+                blocks: vec![
+                    BasicBlock {
+                        id: BlockId(0),
+                        instructions: vec![
+                            IrInstruction::AllocStruct {
+                                destination: ValueId(0),
+                                struct_id: StructId(0),
+                            },
+                            IrInstruction::LoadField {
+                                destination: ValueId(1),
+                                receiver: ValueId(0),
+                                field: 0,
+                            },
+                            IrInstruction::ConstBool {
+                                destination: ValueId(2),
+                                value: true,
+                            },
+                        ],
+                        terminator: Terminator::Branch {
+                            condition: ValueId(2),
+                            then_block: BlockId(1),
+                            else_block: BlockId(2),
+                        },
+                    },
+                    BasicBlock {
+                        id: BlockId(1),
+                        instructions: Vec::new(),
+                        terminator: Terminator::Jump(BlockId(3)),
+                    },
+                    BasicBlock {
+                        id: BlockId(2),
+                        instructions: Vec::new(),
+                        terminator: Terminator::Jump(BlockId(3)),
+                    },
+                    BasicBlock {
+                        id: BlockId(3),
+                        instructions: vec![IrInstruction::LoadField {
+                            destination: ValueId(3),
+                            receiver: ValueId(0),
+                            field: 0,
+                        }],
+                        terminator: Terminator::Return {
+                            value: Some(ValueId(3)),
+                        },
+                    },
+                ],
+            }],
+        };
+
+        eliminate_redundant_field_loads(&mut program).expect("optimization should succeed");
+
+        let instructions = &program.functions[0].blocks[3].instructions;
+
+        assert!(matches!(
+            &instructions[0],
+            IrInstruction::Copy {
+                destination: ValueId(3),
+                source: ValueId(1),
+            }
+        ));
+    }
+
+    #[test]
+    fn does_not_eliminate_field_load_when_predecessors_disagree() {
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![IrFunction {
+                id: None,
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Int,
+                entry: BlockId(0),
+                blocks: vec![
+                    BasicBlock {
+                        id: BlockId(0),
+                        instructions: vec![
+                            IrInstruction::AllocStruct {
+                                destination: ValueId(0),
+                                struct_id: StructId(0),
+                            },
+                            IrInstruction::LoadField {
+                                destination: ValueId(1),
+                                receiver: ValueId(0),
+                                field: 0,
+                            },
+                            IrInstruction::ConstBool {
+                                destination: ValueId(2),
+                                value: true,
+                            },
+                        ],
+                        terminator: Terminator::Branch {
+                            condition: ValueId(2),
+                            then_block: BlockId(1),
+                            else_block: BlockId(2),
+                        },
+                    },
+                    BasicBlock {
+                        id: BlockId(1),
+                        instructions: vec![IrInstruction::LoadField {
+                            destination: ValueId(3),
+                            receiver: ValueId(0),
+                            field: 0,
+                        }],
+                        terminator: Terminator::Jump(BlockId(3)),
+                    },
+                    BasicBlock {
+                        id: BlockId(2),
+                        instructions: vec![IrInstruction::LoadField {
+                            destination: ValueId(4),
+                            receiver: ValueId(0),
+                            field: 0,
+                        }],
+                        terminator: Terminator::Jump(BlockId(3)),
+                    },
+                    BasicBlock {
+                        id: BlockId(3),
+                        instructions: vec![IrInstruction::LoadField {
+                            destination: ValueId(5),
+                            receiver: ValueId(0),
+                            field: 0,
+                        }],
+                        terminator: Terminator::Return {
+                            value: Some(ValueId(5)),
+                        },
+                    },
+                ],
+            }],
+        };
+
+        eliminate_redundant_field_loads(&mut program).expect("optimization should succeed");
+
+        let instructions = &program.functions[0].blocks[3].instructions;
+
+        assert!(matches!(
+            &instructions[0],
+            IrInstruction::LoadField {
+                destination: ValueId(5),
+                receiver: ValueId(0),
+                field: 0,
+            }
+        ));
     }
 }

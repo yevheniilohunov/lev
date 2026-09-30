@@ -46,6 +46,8 @@ pub fn compile(source: &str) -> Result<ir::IrProgram, Vec<CompilerError>> {
     // newly exposed copies and values are visible to GVN.
     ir::cleanup::forward_local_stores(&mut ir)?;
     ir::cleanup::eliminate_redundant_loads(&mut ir)?;
+    ir::cleanup::forward_field_stores(&mut ir)?;
+    ir::cleanup::eliminate_redundant_field_loads(&mut ir)?;
     ir::cleanup::eliminate_dead_stores(&mut ir)?;
 
     // Global value numbering / common-subexpression elimination.

@@ -34,7 +34,6 @@ fn gvn_cse_function(function: &mut IrFunction) -> Result<(), Vec<CompilerError>>
     let predecessors = build_predecessors(function);
 
     let mut in_facts = HashMap::<BlockId, HashMap<GvnExpression, ValueId>>::new();
-
     let mut out_facts = HashMap::<BlockId, HashMap<GvnExpression, ValueId>>::new();
 
     in_facts.insert(function.entry, HashMap::new());
@@ -63,24 +62,44 @@ fn gvn_cse_function(function: &mut IrFunction) -> Result<(), Vec<CompilerError>>
             }
 
             let mut facts = new_in;
+            let mut aliases = HashMap::<ValueId, ValueId>::new();
 
             for instruction in &block.instructions {
-                if let IrInstruction::Binary {
-                    destination,
-                    op,
-                    left,
-                    right,
-                } = instruction
-                {
-                    let (left, right) = canonical_gvn_operands(*op, *left, *right);
-
-                    let expression = GvnExpression {
-                        op: *op,
+                match instruction {
+                    IrInstruction::Binary {
+                        destination,
+                        op,
                         left,
                         right,
-                    };
+                    } => {
+                        let left = canonical_gvn_value(*left, &aliases);
+                        let right = canonical_gvn_value(*right, &aliases);
 
-                    facts.insert(expression, *destination);
+                        let (left, right) = canonical_gvn_operands(*op, left, right);
+
+                        let expression = GvnExpression {
+                            op: *op,
+                            left,
+                            right,
+                        };
+
+                        facts.insert(expression, *destination);
+                    }
+
+                    IrInstruction::Copy {
+                        destination,
+                        source,
+                    } => {
+                        let source = canonical_gvn_value(*source, &aliases);
+
+                        aliases.insert(*destination, source);
+                    }
+
+                    _ => {
+                        if let Some(destination) = instruction_destination(instruction) {
+                            aliases.remove(&destination);
+                        }
+                    }
                 }
             }
 
@@ -98,41 +117,67 @@ fn gvn_cse_function(function: &mut IrFunction) -> Result<(), Vec<CompilerError>>
     for block in &mut function.blocks {
         let mut facts = in_facts.get(&block.id).cloned().unwrap_or_default();
 
+        let mut aliases = HashMap::<ValueId, ValueId>::new();
+
         for instruction in &mut block.instructions {
-            let replacement = match instruction {
+            match instruction {
                 IrInstruction::Binary {
                     destination,
                     op,
                     left,
                     right,
                 } => {
-                    let (left, right) = canonical_gvn_operands(*op, *left, *right);
+                    let canonical_left = canonical_gvn_value(*left, &aliases);
+
+                    let canonical_right = canonical_gvn_value(*right, &aliases);
+
+                    let (canonical_left, canonical_right) =
+                        canonical_gvn_operands(*op, canonical_left, canonical_right);
 
                     let expression = GvnExpression {
                         op: *op,
-                        left,
-                        right,
+                        left: canonical_left,
+                        right: canonical_right,
                     };
 
                     if let Some(existing) = facts.get(&expression).copied() {
                         if existing != *destination {
-                            Some(IrInstruction::Copy {
+                            aliases.insert(*destination, existing);
+
+                            *instruction = IrInstruction::Copy {
                                 destination: *destination,
                                 source: existing,
-                            })
+                            };
                         } else {
-                            None
+                            aliases.remove(destination);
                         }
                     } else {
                         facts.insert(expression, *destination);
-                        None
+                        aliases.remove(destination);
                     }
                 }
-                _ => None,
-            };
 
-            if let Some(replacement) = replacement {
-                *instruction = replacement;
+                IrInstruction::Copy {
+                    destination,
+                    source,
+                } => {
+                    let canonical_source = canonical_gvn_value(*source, &aliases);
+
+                    aliases.insert(*destination, canonical_source);
+
+                    if *source != canonical_source {
+                        *instruction = IrInstruction::Copy {
+                            destination: *destination,
+                            source: canonical_source,
+                        };
+                    }
+                }
+
+                _ => {
+                    if let Some(destination) = instruction_destination(instruction) {
+                        aliases.remove(&destination);
+                    }
+                }
             }
         }
     }
@@ -151,6 +196,20 @@ fn canonical_gvn_operands(op: IrBinaryOp, left: ValueId, right: ValueId) -> (Val
         }
         IrBinaryOp::Subtract | IrBinaryOp::Divide => (left, right),
     }
+}
+
+fn canonical_gvn_value(value: ValueId, aliases: &HashMap<ValueId, ValueId>) -> ValueId {
+    let mut current = value;
+
+    while let Some(next) = aliases.get(&current) {
+        if *next == current {
+            break;
+        }
+
+        current = *next;
+    }
+
+    current
 }
 
 pub fn remove_unreachable_blocks(program: &mut IrProgram) -> Result<(), Vec<CompilerError>> {
@@ -4007,6 +4066,88 @@ mod tests {
                 op: IrBinaryOp::Subtract,
                 left: ValueId(1),
                 right: ValueId(0),
+            }
+        ));
+    }
+
+    #[test]
+    fn gvn_canonicalizes_copy_operands() {
+        let function = IrFunction {
+            id: Some(FunctionId(0)),
+            name: "test".to_string(),
+            owner: None,
+            parameters: Vec::new(),
+            locals: Vec::new(),
+            return_type: IrType::Int,
+            entry: BlockId(0),
+            blocks: vec![BasicBlock {
+                id: BlockId(0),
+                instructions: vec![
+                    IrInstruction::Parameter {
+                        destination: ValueId(0),
+                        local: LocalId(0),
+                    },
+                    IrInstruction::Parameter {
+                        destination: ValueId(1),
+                        local: LocalId(1),
+                    },
+                    IrInstruction::Binary {
+                        destination: ValueId(2),
+                        op: IrBinaryOp::Add,
+                        left: ValueId(0),
+                        right: ValueId(1),
+                    },
+                    IrInstruction::Copy {
+                        destination: ValueId(3),
+                        source: ValueId(2),
+                    },
+                    IrInstruction::Parameter {
+                        destination: ValueId(4),
+                        local: LocalId(2),
+                    },
+                    IrInstruction::Binary {
+                        destination: ValueId(5),
+                        op: IrBinaryOp::Add,
+                        left: ValueId(3),
+                        right: ValueId(4),
+                    },
+                    IrInstruction::Binary {
+                        destination: ValueId(6),
+                        op: IrBinaryOp::Add,
+                        left: ValueId(2),
+                        right: ValueId(4),
+                    },
+                ],
+                terminator: Terminator::Return {
+                    value: Some(ValueId(6)),
+                },
+            }],
+        };
+
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![function],
+        };
+
+        gvn_cse(&mut program).unwrap();
+
+        let function = &program.functions[0];
+
+        assert!(matches!(
+            &function.blocks[0].instructions[5],
+            IrInstruction::Binary {
+                destination: ValueId(5),
+                op: IrBinaryOp::Add,
+                left: ValueId(3),
+                right: ValueId(4),
+            }
+        ));
+
+        assert!(matches!(
+            &function.blocks[0].instructions[6],
+            IrInstruction::Copy {
+                destination: ValueId(6),
+                source: ValueId(5),
             }
         ));
     }

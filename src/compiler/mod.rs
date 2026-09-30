@@ -52,6 +52,8 @@ pub fn compile(source: &str) -> Result<ir::IrProgram, Vec<CompilerError>> {
     // Copy propagation
     ir::cleanup::copy_propagate(&mut ir)?;
 
+    ir::cleanup::eliminate_redundant_copies(&mut ir)?;
+
     // Remove unused pure instructions.
     ir::cleanup::eliminate_dead_code(&mut ir)?;
 

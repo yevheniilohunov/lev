@@ -44,6 +44,8 @@ pub fn compile(source: &str) -> Result<ir::IrProgram, Vec<CompilerError>> {
     // Propagate known constants.
     ir::cleanup::constant_propagate(&mut ir)?;
 
+    ir::cleanup::simplify_algebraic(&mut ir)?;
+
     // Fold constant integer expressions.
     ir::cleanup::constant_fold(&mut ir)?;
 

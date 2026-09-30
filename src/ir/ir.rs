@@ -53,7 +53,7 @@ pub struct BasicBlock {
     pub terminator: Terminator,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IrInstruction {
     /// Initial SSA definition for a function parameter.
     Parameter {

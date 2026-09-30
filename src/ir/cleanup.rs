@@ -1210,6 +1210,143 @@ fn thread_jumps_function(function: &mut IrFunction) -> Result<(), Vec<CompilerEr
     Ok(())
 }
 
+pub fn simplify_algebraic(program: &mut IrProgram) -> Result<(), Vec<CompilerError>> {
+    let mut errors = Vec::new();
+
+    for function in &mut program.functions {
+        if let Err(error) = simplify_algebraic_function(function) {
+            errors.extend(error);
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+fn simplify_algebraic_function(function: &mut IrFunction) -> Result<(), Vec<CompilerError>> {
+    let predecessors = build_predecessors(function);
+
+    let mut in_facts = HashMap::<BlockId, HashMap<ValueId, i64>>::new();
+    let mut out_facts = HashMap::<BlockId, HashMap<ValueId, i64>>::new();
+
+    in_facts.insert(function.entry, HashMap::new());
+
+    loop {
+        let mut changed = false;
+
+        for block in &function.blocks {
+            let block_id = block.id;
+
+            let new_in = if block_id == function.entry {
+                HashMap::new()
+            } else {
+                let preds = predecessors.get(&block_id).cloned().unwrap_or_default();
+
+                if preds.is_empty() {
+                    HashMap::new()
+                } else {
+                    intersect_constant_facts(&preds, &out_facts)
+                }
+            };
+
+            if in_facts.get(&block_id) != Some(&new_in) {
+                in_facts.insert(block_id, new_in.clone());
+                changed = true;
+            }
+
+            let mut facts = new_in;
+
+            for instruction in &block.instructions {
+                transfer_constant_fact(instruction, &mut facts);
+            }
+
+            if out_facts.get(&block_id) != Some(&facts) {
+                out_facts.insert(block_id, facts);
+                changed = true;
+            }
+        }
+
+        if !changed {
+            break;
+        }
+    }
+
+    for block in &mut function.blocks {
+        let mut facts = in_facts.get(&block.id).cloned().unwrap_or_default();
+
+        for instruction in &mut block.instructions {
+            let replacement = match instruction {
+                IrInstruction::Binary {
+                    destination,
+                    op,
+                    left,
+                    right,
+                } => {
+                    let left_constant = facts.get(left).copied();
+                    let right_constant = facts.get(right).copied();
+
+                    match (op, left_constant, right_constant) {
+                        (IrBinaryOp::Add, _, Some(0)) => Some(IrInstruction::Copy {
+                            destination: *destination,
+                            source: *left,
+                        }),
+
+                        (IrBinaryOp::Add, Some(0), _) => Some(IrInstruction::Copy {
+                            destination: *destination,
+                            source: *right,
+                        }),
+
+                        (IrBinaryOp::Subtract, _, Some(0)) => Some(IrInstruction::Copy {
+                            destination: *destination,
+                            source: *left,
+                        }),
+
+                        (IrBinaryOp::Multiply, _, Some(1)) => Some(IrInstruction::Copy {
+                            destination: *destination,
+                            source: *left,
+                        }),
+
+                        (IrBinaryOp::Multiply, Some(1), _) => Some(IrInstruction::Copy {
+                            destination: *destination,
+                            source: *right,
+                        }),
+
+                        (IrBinaryOp::Multiply, _, Some(0)) => Some(IrInstruction::ConstInt {
+                            destination: *destination,
+                            value: 0,
+                        }),
+
+                        (IrBinaryOp::Multiply, Some(0), _) => Some(IrInstruction::ConstInt {
+                            destination: *destination,
+                            value: 0,
+                        }),
+
+                        (IrBinaryOp::Divide, _, Some(1)) => Some(IrInstruction::Copy {
+                            destination: *destination,
+                            source: *left,
+                        }),
+
+                        _ => None,
+                    }
+                }
+
+                _ => None,
+            };
+
+            if let Some(replacement) = replacement {
+                *instruction = replacement;
+            }
+
+            transfer_constant_fact(instruction, &mut facts);
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3006,6 +3143,390 @@ mod tests {
                 condition: ValueId(0),
                 then_block: BlockId(3),
                 else_block: BlockId(3),
+            }
+        );
+    }
+
+    #[test]
+    fn simplifies_add_zero() {
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![IrFunction {
+                id: None,
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Int,
+                entry: BlockId(0),
+                blocks: vec![BasicBlock {
+                    id: BlockId(0),
+                    instructions: vec![
+                        IrInstruction::ConstInt {
+                            destination: ValueId(0),
+                            value: 10,
+                        },
+                        IrInstruction::ConstInt {
+                            destination: ValueId(1),
+                            value: 0,
+                        },
+                        IrInstruction::Binary {
+                            destination: ValueId(2),
+                            op: IrBinaryOp::Add,
+                            left: ValueId(0),
+                            right: ValueId(1),
+                        },
+                    ],
+                    terminator: Terminator::Return {
+                        value: Some(ValueId(2)),
+                    },
+                }],
+            }],
+        };
+
+        simplify_algebraic(&mut program).expect("algebraic simplification should succeed");
+
+        assert_eq!(
+            program.functions[0].blocks[0].instructions[2],
+            IrInstruction::Copy {
+                destination: ValueId(2),
+                source: ValueId(0),
+            }
+        );
+    }
+
+    #[test]
+    fn simplifies_zero_add() {
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![IrFunction {
+                id: None,
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Int,
+                entry: BlockId(0),
+                blocks: vec![BasicBlock {
+                    id: BlockId(0),
+                    instructions: vec![
+                        IrInstruction::ConstInt {
+                            destination: ValueId(0),
+                            value: 0,
+                        },
+                        IrInstruction::ConstInt {
+                            destination: ValueId(1),
+                            value: 10,
+                        },
+                        IrInstruction::Binary {
+                            destination: ValueId(2),
+                            op: IrBinaryOp::Add,
+                            left: ValueId(0),
+                            right: ValueId(1),
+                        },
+                    ],
+                    terminator: Terminator::Return {
+                        value: Some(ValueId(2)),
+                    },
+                }],
+            }],
+        };
+
+        simplify_algebraic(&mut program).expect("algebraic simplification should succeed");
+
+        assert_eq!(
+            program.functions[0].blocks[0].instructions[2],
+            IrInstruction::Copy {
+                destination: ValueId(2),
+                source: ValueId(1),
+            }
+        );
+    }
+
+    #[test]
+    fn simplifies_subtract_zero() {
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![IrFunction {
+                id: None,
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Int,
+                entry: BlockId(0),
+                blocks: vec![BasicBlock {
+                    id: BlockId(0),
+                    instructions: vec![
+                        IrInstruction::ConstInt {
+                            destination: ValueId(0),
+                            value: 10,
+                        },
+                        IrInstruction::ConstInt {
+                            destination: ValueId(1),
+                            value: 0,
+                        },
+                        IrInstruction::Binary {
+                            destination: ValueId(2),
+                            op: IrBinaryOp::Subtract,
+                            left: ValueId(0),
+                            right: ValueId(1),
+                        },
+                    ],
+                    terminator: Terminator::Return {
+                        value: Some(ValueId(2)),
+                    },
+                }],
+            }],
+        };
+
+        simplify_algebraic(&mut program).expect("algebraic simplification should succeed");
+
+        assert_eq!(
+            program.functions[0].blocks[0].instructions[2],
+            IrInstruction::Copy {
+                destination: ValueId(2),
+                source: ValueId(0),
+            }
+        );
+    }
+
+    #[test]
+    fn simplifies_multiply_one() {
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![IrFunction {
+                id: None,
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Int,
+                entry: BlockId(0),
+                blocks: vec![BasicBlock {
+                    id: BlockId(0),
+                    instructions: vec![
+                        IrInstruction::ConstInt {
+                            destination: ValueId(0),
+                            value: 10,
+                        },
+                        IrInstruction::ConstInt {
+                            destination: ValueId(1),
+                            value: 1,
+                        },
+                        IrInstruction::Binary {
+                            destination: ValueId(2),
+                            op: IrBinaryOp::Multiply,
+                            left: ValueId(0),
+                            right: ValueId(1),
+                        },
+                    ],
+                    terminator: Terminator::Return {
+                        value: Some(ValueId(2)),
+                    },
+                }],
+            }],
+        };
+
+        simplify_algebraic(&mut program).expect("algebraic simplification should succeed");
+
+        assert_eq!(
+            program.functions[0].blocks[0].instructions[2],
+            IrInstruction::Copy {
+                destination: ValueId(2),
+                source: ValueId(0),
+            }
+        );
+    }
+
+    #[test]
+    fn simplifies_one_multiply() {
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![IrFunction {
+                id: None,
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Int,
+                entry: BlockId(0),
+                blocks: vec![BasicBlock {
+                    id: BlockId(0),
+                    instructions: vec![
+                        IrInstruction::ConstInt {
+                            destination: ValueId(0),
+                            value: 1,
+                        },
+                        IrInstruction::ConstInt {
+                            destination: ValueId(1),
+                            value: 10,
+                        },
+                        IrInstruction::Binary {
+                            destination: ValueId(2),
+                            op: IrBinaryOp::Multiply,
+                            left: ValueId(0),
+                            right: ValueId(1),
+                        },
+                    ],
+                    terminator: Terminator::Return {
+                        value: Some(ValueId(2)),
+                    },
+                }],
+            }],
+        };
+
+        simplify_algebraic(&mut program).expect("algebraic simplification should succeed");
+
+        assert_eq!(
+            program.functions[0].blocks[0].instructions[2],
+            IrInstruction::Copy {
+                destination: ValueId(2),
+                source: ValueId(1),
+            }
+        );
+    }
+
+    #[test]
+    fn simplifies_multiply_zero() {
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![IrFunction {
+                id: None,
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Int,
+                entry: BlockId(0),
+                blocks: vec![BasicBlock {
+                    id: BlockId(0),
+                    instructions: vec![
+                        IrInstruction::ConstInt {
+                            destination: ValueId(0),
+                            value: 10,
+                        },
+                        IrInstruction::ConstInt {
+                            destination: ValueId(1),
+                            value: 0,
+                        },
+                        IrInstruction::Binary {
+                            destination: ValueId(2),
+                            op: IrBinaryOp::Multiply,
+                            left: ValueId(0),
+                            right: ValueId(1),
+                        },
+                    ],
+                    terminator: Terminator::Return {
+                        value: Some(ValueId(2)),
+                    },
+                }],
+            }],
+        };
+
+        simplify_algebraic(&mut program).expect("algebraic simplification should succeed");
+
+        assert_eq!(
+            program.functions[0].blocks[0].instructions[2],
+            IrInstruction::ConstInt {
+                destination: ValueId(2),
+                value: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn simplifies_zero_multiply() {
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![IrFunction {
+                id: None,
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Int,
+                entry: BlockId(0),
+                blocks: vec![BasicBlock {
+                    id: BlockId(0),
+                    instructions: vec![
+                        IrInstruction::ConstInt {
+                            destination: ValueId(0),
+                            value: 0,
+                        },
+                        IrInstruction::ConstInt {
+                            destination: ValueId(1),
+                            value: 10,
+                        },
+                        IrInstruction::Binary {
+                            destination: ValueId(2),
+                            op: IrBinaryOp::Multiply,
+                            left: ValueId(0),
+                            right: ValueId(1),
+                        },
+                    ],
+                    terminator: Terminator::Return {
+                        value: Some(ValueId(2)),
+                    },
+                }],
+            }],
+        };
+
+        simplify_algebraic(&mut program).expect("algebraic simplification should succeed");
+
+        assert_eq!(
+            program.functions[0].blocks[0].instructions[2],
+            IrInstruction::ConstInt {
+                destination: ValueId(2),
+                value: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn simplifies_divide_one() {
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![IrFunction {
+                id: None,
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Int,
+                entry: BlockId(0),
+                blocks: vec![BasicBlock {
+                    id: BlockId(0),
+                    instructions: vec![
+                        IrInstruction::ConstInt {
+                            destination: ValueId(0),
+                            value: 10,
+                        },
+                        IrInstruction::ConstInt {
+                            destination: ValueId(1),
+                            value: 1,
+                        },
+                        IrInstruction::Binary {
+                            destination: ValueId(2),
+                            op: IrBinaryOp::Divide,
+                            left: ValueId(0),
+                            right: ValueId(1),
+                        },
+                    ],
+                    terminator: Terminator::Return {
+                        value: Some(ValueId(2)),
+                    },
+                }],
+            }],
+        };
+
+        simplify_algebraic(&mut program).expect("algebraic simplification should succeed");
+
+        assert_eq!(
+            program.functions[0].blocks[0].instructions[2],
+            IrInstruction::Copy {
+                destination: ValueId(2),
+                source: ValueId(0),
             }
         );
     }

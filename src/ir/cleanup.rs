@@ -1755,6 +1755,61 @@ fn eliminate_redundant_copies_function(
     Ok(())
 }
 
+pub fn eliminate_redundant_loads(program: &mut IrProgram) -> Result<(), Vec<CompilerError>> {
+    let mut errors = Vec::new();
+
+    for function in &mut program.functions {
+        if let Err(error) = eliminate_redundant_loads_function(function) {
+            errors.extend(error);
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+fn eliminate_redundant_loads_function(function: &mut IrFunction) -> Result<(), Vec<CompilerError>> {
+    for block in &mut function.blocks {
+        let mut loaded = HashMap::<LocalId, ValueId>::new();
+
+        for instruction in &mut block.instructions {
+            let replacement =
+                match instruction {
+                    IrInstruction::LoadLocal { destination, local } => loaded
+                        .get(local)
+                        .copied()
+                        .map(|source| IrInstruction::Copy {
+                            destination: *destination,
+                            source,
+                        }),
+
+                    _ => None,
+                };
+
+            if let Some(replacement) = replacement {
+                *instruction = replacement;
+            }
+
+            match instruction {
+                IrInstruction::StoreLocal { local, .. } => {
+                    loaded.remove(local);
+                }
+
+                IrInstruction::LoadLocal { destination, local } => {
+                    loaded.insert(*local, *destination);
+                }
+
+                _ => {}
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4476,6 +4531,106 @@ mod tests {
             &function.blocks[3].instructions[0],
             IrInstruction::LoadLocal {
                 destination: ValueId(3),
+                local: LocalId(0),
+            }
+        ));
+    }
+
+    #[test]
+    fn eliminates_redundant_loads() {
+        let function = IrFunction {
+            id: Some(FunctionId(0)),
+            name: "test".to_string(),
+            owner: None,
+            parameters: Vec::new(),
+            locals: Vec::new(),
+            return_type: IrType::Int,
+            entry: BlockId(0),
+            blocks: vec![BasicBlock {
+                id: BlockId(0),
+                instructions: vec![
+                    IrInstruction::LoadLocal {
+                        destination: ValueId(0),
+                        local: LocalId(0),
+                    },
+                    IrInstruction::LoadLocal {
+                        destination: ValueId(1),
+                        local: LocalId(0),
+                    },
+                ],
+                terminator: Terminator::Return {
+                    value: Some(ValueId(1)),
+                },
+            }],
+        };
+
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![function],
+        };
+
+        eliminate_redundant_loads(&mut program).unwrap();
+
+        let function = &program.functions[0];
+
+        assert!(matches!(
+            &function.blocks[0].instructions[1],
+            IrInstruction::Copy {
+                destination: ValueId(1),
+                source: ValueId(0),
+            }
+        ));
+    }
+
+    #[test]
+    fn does_not_eliminate_load_after_store() {
+        let function = IrFunction {
+            id: Some(FunctionId(0)),
+            name: "test".to_string(),
+            owner: None,
+            parameters: Vec::new(),
+            locals: Vec::new(),
+            return_type: IrType::Int,
+            entry: BlockId(0),
+            blocks: vec![BasicBlock {
+                id: BlockId(0),
+                instructions: vec![
+                    IrInstruction::LoadLocal {
+                        destination: ValueId(0),
+                        local: LocalId(0),
+                    },
+                    IrInstruction::ConstInt {
+                        destination: ValueId(1),
+                        value: 42,
+                    },
+                    IrInstruction::StoreLocal {
+                        local: LocalId(0),
+                        value: ValueId(1),
+                    },
+                    IrInstruction::LoadLocal {
+                        destination: ValueId(2),
+                        local: LocalId(0),
+                    },
+                ],
+                terminator: Terminator::Return {
+                    value: Some(ValueId(2)),
+                },
+            }],
+        };
+
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![function],
+        };
+
+        eliminate_redundant_loads(&mut program).unwrap();
+
+        let function = &program.functions[0];
+
+        assert!(matches!(
+            &function.blocks[0].instructions[3],
+            IrInstruction::LoadLocal {
+                destination: ValueId(2),
                 local: LocalId(0),
             }
         ));

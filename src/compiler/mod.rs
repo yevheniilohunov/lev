@@ -53,6 +53,8 @@ pub fn compile(source: &str) -> Result<ir::IrProgram, Vec<CompilerError>> {
 
     ir::cleanup::forward_local_stores(&mut ir)?;
 
+    ir::cleanup::eliminate_redundant_loads(&mut ir)?;
+
     // Copy propagation
     ir::cleanup::copy_propagate(&mut ir)?;
 

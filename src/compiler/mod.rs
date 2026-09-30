@@ -27,8 +27,16 @@ pub fn compile(source: &str) -> Result<ir::IrProgram, Vec<CompilerError>> {
 
     ir::phi::lower_phis(&mut ir)?;
 
+    ir::cleanup::simplify_constant_branches(&mut ir)?;
+
+    ir::cleanup::simplify_redundant_branches(&mut ir)?;
+
+    ir::cleanup::thread_jumps(&mut ir)?;
+
     // Remove unreachable CFG blocks.
     ir::cleanup::remove_unreachable_blocks(&mut ir)?;
+
+    ir::cleanup::remove_empty_blocks(&mut ir)?;
 
     // Validate the cleaned non-SSA IR.
     ir::validate(&ir)?;
@@ -279,5 +287,109 @@ mod tests {
                 }
             )
         }));
+    }
+
+    #[test]
+    fn compile_simplifies_constant_true_branch() {
+        let source = r#"
+        fn main(): int {
+            if (true) {
+                return 10;
+            } else {
+                return 20;
+            }
+        }
+    "#;
+
+        let program = compile(source).expect("program should compile successfully");
+        let function = &program.functions[0];
+
+        assert!(
+            function.blocks.len() < 4,
+            "constant branch should allow unreachable CFG blocks to be removed"
+        );
+
+        let instructions = function
+            .blocks
+            .iter()
+            .flat_map(|block| block.instructions.iter())
+            .collect::<Vec<_>>();
+
+        assert!(instructions.iter().any(|instruction| {
+            matches!(instruction, IrInstruction::ConstInt { value: 10, .. })
+        }));
+
+        assert!(!instructions.iter().any(|instruction| {
+            matches!(instruction, IrInstruction::ConstInt { value: 20, .. })
+        }));
+
+        assert!(function
+            .blocks
+            .iter()
+            .all(|block| { !matches!(block.terminator, crate::ir::Terminator::Branch { .. }) }));
+    }
+
+    #[test]
+    fn compile_simplifies_constant_false_branch() {
+        let source = r#"
+        fn main(): int {
+            if (false) {
+                return 10;
+            } else {
+                return 20;
+            }
+        }
+    "#;
+
+        let program = compile(source).expect("program should compile successfully");
+        let function = &program.functions[0];
+
+        let instructions = function
+            .blocks
+            .iter()
+            .flat_map(|block| block.instructions.iter())
+            .collect::<Vec<_>>();
+
+        assert!(instructions.iter().any(|instruction| {
+            matches!(instruction, IrInstruction::ConstInt { value: 20, .. })
+        }));
+
+        assert!(!instructions.iter().any(|instruction| {
+            matches!(instruction, IrInstruction::ConstInt { value: 10, .. })
+        }));
+
+        assert!(function
+            .blocks
+            .iter()
+            .all(|block| { !matches!(block.terminator, crate::ir::Terminator::Branch { .. }) }));
+    }
+
+    #[test]
+    fn compile_removes_empty_jump_blocks() {
+        let source = r#"
+        fn main(): int {
+            let x: int = 10;
+
+            if (true) {
+                x = 20;
+            }
+
+            return x;
+        }
+    "#;
+
+        let program = compile(source).expect("program should compile successfully");
+
+        let function = &program.functions[0];
+
+        assert!(
+            function.blocks.len() <= 3,
+            "constant condition should not leave redundant CFG blocks"
+        );
+
+        assert!(function
+            .blocks
+            .iter()
+            .all(|block| { !matches!(block.terminator, crate::ir::Terminator::Branch { .. }) }));
     }
 }

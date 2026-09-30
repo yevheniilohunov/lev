@@ -11,7 +11,7 @@ pub fn remove_unreachable_blocks(program: &mut IrProgram) -> Result<(), Vec<Comp
     let mut errors = Vec::new();
 
     for function in &mut program.functions {
-        if let Err(error) = cleanup_function(function) {
+        if let Err(error) = remove_unreachable_blocks_function(function) {
             errors.extend(error);
         }
     }
@@ -21,6 +21,29 @@ pub fn remove_unreachable_blocks(program: &mut IrProgram) -> Result<(), Vec<Comp
     } else {
         Err(errors)
     }
+}
+
+fn remove_unreachable_blocks_function(function: &mut IrFunction) -> Result<(), Vec<CompilerError>> {
+    let reachable = function.reachable_blocks();
+
+    if !reachable.contains(&function.entry) {
+        return Err(vec![CompilerError {
+            message: format!(
+                "function '{}': entry block {:?} is unreachable",
+                function.name, function.entry
+            ),
+            src: None,
+            span: None,
+        }]);
+    }
+
+    function
+        .blocks
+        .retain(|block| reachable.contains(&block.id));
+
+    renumber_blocks(function);
+
+    Ok(())
 }
 
 pub fn eliminate_dead_code(program: &mut IrProgram) -> Result<(), Vec<CompilerError>> {
@@ -200,23 +223,6 @@ fn instruction_destination(instruction: &IrInstruction) -> Option<ValueId> {
     }
 }
 
-fn cleanup_function(function: &mut IrFunction) -> Result<(), Vec<CompilerError>> {
-    let reachable = function.reachable_blocks();
-
-    if !reachable.contains(&function.entry) {
-        return Err(vec![CompilerError::internal(format!(
-            "function {} has an unreachable entry block {:?}",
-            function.name, function.entry
-        ))]);
-    }
-
-    function
-        .blocks
-        .retain(|block| reachable.contains(&block.id));
-
-    Ok(())
-}
-
 pub fn constant_fold(program: &mut IrProgram) -> Result<(), Vec<CompilerError>> {
     let mut errors = Vec::new();
 
@@ -234,13 +240,60 @@ pub fn constant_fold(program: &mut IrProgram) -> Result<(), Vec<CompilerError>> 
 }
 
 fn constant_fold_function(function: &mut IrFunction) -> Result<(), Vec<CompilerError>> {
-    let mut constants = HashMap::<ValueId, i64>::new();
+    let predecessors = build_predecessors(function);
+
+    let mut in_facts = HashMap::<BlockId, HashMap<ValueId, i64>>::new();
+    let mut out_facts = HashMap::<BlockId, HashMap<ValueId, i64>>::new();
+
+    in_facts.insert(function.entry, HashMap::new());
+
+    loop {
+        let mut changed = false;
+
+        for block in &function.blocks {
+            let block_id = block.id;
+
+            let new_in = if block_id == function.entry {
+                HashMap::new()
+            } else {
+                let preds = predecessors.get(&block_id).cloned().unwrap_or_default();
+
+                if preds.is_empty() {
+                    HashMap::new()
+                } else {
+                    intersect_constant_facts(&preds, &out_facts)
+                }
+            };
+
+            if in_facts.get(&block_id) != Some(&new_in) {
+                in_facts.insert(block_id, new_in.clone());
+                changed = true;
+            }
+
+            let mut facts = new_in;
+
+            for instruction in &block.instructions {
+                transfer_fold_facts(instruction, &mut facts);
+            }
+
+            if out_facts.get(&block_id) != Some(&facts) {
+                out_facts.insert(block_id, facts);
+                changed = true;
+            }
+        }
+
+        if !changed {
+            break;
+        }
+    }
 
     for block in &mut function.blocks {
+        let mut facts = in_facts.get(&block.id).cloned().unwrap_or_default();
+
         for instruction in &mut block.instructions {
-            let folded = match instruction {
+            let replacement = match instruction {
                 IrInstruction::ConstInt { destination, value } => {
-                    constants.insert(*destination, *value);
+                    facts.insert(*destination, *value);
                     None
                 }
 
@@ -250,25 +303,52 @@ fn constant_fold_function(function: &mut IrFunction) -> Result<(), Vec<CompilerE
                     left,
                     right,
                 } => {
-                    let Some(left_value) = constants.get(left).copied() else {
-                        continue;
-                    };
+                    let left_value = facts.get(left).copied();
+                    let right_value = facts.get(right).copied();
 
-                    let Some(right_value) = constants.get(right).copied() else {
-                        continue;
-                    };
-
-                    fold_integer_binary(*op, left_value, right_value)
-                        .map(|value| (*destination, value))
+                    match (left_value, right_value) {
+                        (Some(left), Some(right)) => {
+                            fold_integer_binary(*destination, *op, left, right)
+                        }
+                        _ => {
+                            facts.remove(destination);
+                            None
+                        }
+                    }
                 }
 
-                _ => None,
+                IrInstruction::Copy {
+                    destination,
+                    source,
+                } => {
+                    if let Some(value) = facts.get(source).copied() {
+                        facts.insert(*destination, value);
+
+                        Some(IrInstruction::ConstInt {
+                            destination: *destination,
+                            value,
+                        })
+                    } else {
+                        facts.remove(destination);
+                        None
+                    }
+                }
+
+                _ => {
+                    if let Some(destination) = instruction_destination(instruction) {
+                        facts.remove(&destination);
+                    }
+
+                    None
+                }
             };
 
-            if let Some((destination, value)) = folded {
-                *instruction = IrInstruction::ConstInt { destination, value };
+            if let Some(replacement) = replacement {
+                if let IrInstruction::ConstInt { destination, value } = &replacement {
+                    facts.insert(*destination, *value);
+                }
 
-                constants.insert(destination, value);
+                *instruction = replacement;
             }
         }
     }
@@ -276,19 +356,90 @@ fn constant_fold_function(function: &mut IrFunction) -> Result<(), Vec<CompilerE
     Ok(())
 }
 
-fn fold_integer_binary(op: IrBinaryOp, left: i64, right: i64) -> Option<i64> {
+fn transfer_fold_facts(instruction: &IrInstruction, facts: &mut HashMap<ValueId, i64>) {
+    match instruction {
+        IrInstruction::ConstInt { destination, value } => {
+            facts.insert(*destination, *value);
+        }
+
+        IrInstruction::Binary {
+            destination,
+            op,
+            left,
+            right,
+        } => {
+            let Some(left_value) = facts.get(left).copied() else {
+                facts.remove(destination);
+                return;
+            };
+
+            let Some(right_value) = facts.get(right).copied() else {
+                facts.remove(destination);
+                return;
+            };
+
+            match fold_integer_binary(*destination, *op, left_value, right_value) {
+                Some(IrInstruction::ConstInt { value, .. }) => {
+                    facts.insert(*destination, value);
+                }
+
+                _ => {
+                    facts.remove(destination);
+                }
+            }
+        }
+
+        IrInstruction::Copy {
+            destination,
+            source,
+        } => {
+            if let Some(value) = facts.get(source).copied() {
+                facts.insert(*destination, value);
+            } else {
+                facts.remove(destination);
+            }
+        }
+
+        _ => {
+            if let Some(destination) = instruction_destination(instruction) {
+                facts.remove(&destination);
+            }
+        }
+    }
+}
+
+fn fold_integer_binary(
+    destination: ValueId,
+    op: IrBinaryOp,
+    left: i64,
+    right: i64,
+) -> Option<IrInstruction> {
     match op {
-        IrBinaryOp::Add => left.checked_add(right),
-        IrBinaryOp::Subtract => left.checked_sub(right),
-        IrBinaryOp::Multiply => left.checked_mul(right),
+        IrBinaryOp::Add => left
+            .checked_add(right)
+            .map(|value| IrInstruction::ConstInt { destination, value }),
+
+        IrBinaryOp::Subtract => left
+            .checked_sub(right)
+            .map(|value| IrInstruction::ConstInt { destination, value }),
+
+        IrBinaryOp::Multiply => left
+            .checked_mul(right)
+            .map(|value| IrInstruction::ConstInt { destination, value }),
+
         IrBinaryOp::Divide => {
             if right == 0 {
                 None
             } else {
                 left.checked_div(right)
+                    .map(|value| IrInstruction::ConstInt { destination, value })
             }
         }
-        IrBinaryOp::Equal => Some((left == right) as i64),
+
+        IrBinaryOp::Equal => Some(IrInstruction::ConstBool {
+            destination,
+            value: left == right,
+        }),
     }
 }
 
@@ -694,6 +845,369 @@ fn rewrite_terminator_values(terminator: &mut Terminator, copies: &HashMap<Value
 
         Terminator::Jump(_) | Terminator::Unreachable => {}
     }
+}
+
+pub fn simplify_constant_branches(program: &mut IrProgram) -> Result<(), Vec<CompilerError>> {
+    let mut errors = Vec::new();
+
+    for function in &mut program.functions {
+        if let Err(error) = simplify_constant_branches_function(function) {
+            errors.extend(error);
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+fn simplify_constant_branches_function(
+    function: &mut IrFunction,
+) -> Result<(), Vec<CompilerError>> {
+    let predecessors = build_predecessors(function);
+
+    let mut in_facts = HashMap::<BlockId, HashMap<ValueId, bool>>::new();
+    let mut out_facts = HashMap::<BlockId, HashMap<ValueId, bool>>::new();
+
+    in_facts.insert(function.entry, HashMap::new());
+
+    loop {
+        let mut changed = false;
+
+        for block in &function.blocks {
+            let block_id = block.id;
+
+            let new_in = if block_id == function.entry {
+                HashMap::new()
+            } else {
+                let preds = predecessors.get(&block_id).cloned().unwrap_or_default();
+
+                if preds.is_empty() {
+                    HashMap::new()
+                } else {
+                    intersect_bool_facts(&preds, &out_facts)
+                }
+            };
+
+            if in_facts.get(&block_id) != Some(&new_in) {
+                in_facts.insert(block_id, new_in.clone());
+                changed = true;
+            }
+
+            let mut facts = new_in;
+
+            for instruction in &block.instructions {
+                transfer_bool_fact(instruction, &mut facts);
+            }
+
+            if out_facts.get(&block_id) != Some(&facts) {
+                out_facts.insert(block_id, facts);
+                changed = true;
+            }
+        }
+
+        if !changed {
+            break;
+        }
+    }
+
+    for block in &mut function.blocks {
+        let mut facts = in_facts.get(&block.id).cloned().unwrap_or_default();
+
+        for instruction in &block.instructions {
+            transfer_bool_fact(instruction, &mut facts);
+        }
+
+        if let Terminator::Branch {
+            condition,
+            then_block,
+            else_block,
+        } = block.terminator
+        {
+            if let Some(value) = facts.get(&condition).copied() {
+                block.terminator = if value {
+                    Terminator::Jump(then_block)
+                } else {
+                    Terminator::Jump(else_block)
+                };
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn intersect_bool_facts(
+    predecessors: &[BlockId],
+    out_facts: &HashMap<BlockId, HashMap<ValueId, bool>>,
+) -> HashMap<ValueId, bool> {
+    let Some(first) = predecessors.first() else {
+        return HashMap::new();
+    };
+
+    let Some(first_facts) = out_facts.get(first) else {
+        return HashMap::new();
+    };
+
+    let mut result = first_facts.clone();
+
+    for predecessor in &predecessors[1..] {
+        let Some(facts) = out_facts.get(predecessor) else {
+            return HashMap::new();
+        };
+
+        result.retain(|value, constant| facts.get(value) == Some(constant));
+    }
+
+    result
+}
+
+fn transfer_bool_fact(instruction: &IrInstruction, facts: &mut HashMap<ValueId, bool>) {
+    match instruction {
+        IrInstruction::ConstBool { destination, value } => {
+            facts.insert(*destination, *value);
+        }
+
+        IrInstruction::Copy {
+            destination,
+            source,
+        } => {
+            if let Some(value) = facts.get(source).copied() {
+                facts.insert(*destination, value);
+            } else {
+                facts.remove(destination);
+            }
+        }
+
+        _ => {
+            if let Some(destination) = instruction_destination(instruction) {
+                facts.remove(&destination);
+            }
+        }
+    }
+}
+
+pub fn remove_empty_blocks(program: &mut IrProgram) -> Result<(), Vec<CompilerError>> {
+    let mut errors = Vec::new();
+
+    for function in &mut program.functions {
+        if let Err(error) = remove_empty_blocks_function(function) {
+            errors.extend(error);
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+fn remove_empty_blocks_function(function: &mut IrFunction) -> Result<(), Vec<CompilerError>> {
+    loop {
+        let mut target = None;
+
+        for block in &function.blocks {
+            if block.id == function.entry {
+                continue;
+            }
+
+            if block.instructions.is_empty() {
+                if let Terminator::Jump(destination) = block.terminator {
+                    if destination != block.id {
+                        target = Some((block.id, destination));
+                        break;
+                    }
+                }
+            }
+        }
+
+        let Some((removed, destination)) = target else {
+            break;
+        };
+
+        for block in &mut function.blocks {
+            rewrite_block_target(&mut block.terminator, removed, destination);
+        }
+
+        function.blocks.retain(|block| block.id != removed);
+    }
+
+    renumber_blocks(function);
+
+    Ok(())
+}
+
+fn rewrite_block_target(terminator: &mut Terminator, removed: BlockId, destination: BlockId) {
+    match terminator {
+        Terminator::Jump(target) => {
+            if *target == removed {
+                *target = destination;
+            }
+        }
+
+        Terminator::Branch {
+            then_block,
+            else_block,
+            ..
+        } => {
+            if *then_block == removed {
+                *then_block = destination;
+            }
+
+            if *else_block == removed {
+                *else_block = destination;
+            }
+        }
+
+        Terminator::Return { .. } | Terminator::Unreachable => {}
+    }
+}
+
+fn renumber_blocks(function: &mut IrFunction) {
+    let mut block_id_map = HashMap::<BlockId, BlockId>::new();
+
+    for (index, block) in function.blocks.iter().enumerate() {
+        block_id_map.insert(block.id, BlockId(index));
+    }
+
+    for block in &mut function.blocks {
+        block.id = *block_id_map
+            .get(&block.id)
+            .expect("block must have a new block id");
+
+        match &mut block.terminator {
+            Terminator::Jump(target) => {
+                *target = *block_id_map.get(target).expect("jump target must exist");
+            }
+
+            Terminator::Branch {
+                then_block,
+                else_block,
+                ..
+            } => {
+                *then_block = *block_id_map.get(then_block).expect("then block must exist");
+
+                *else_block = *block_id_map.get(else_block).expect("else block must exist");
+            }
+
+            Terminator::Return { .. } | Terminator::Unreachable => {}
+        }
+    }
+
+    function.entry = *block_id_map
+        .get(&function.entry)
+        .expect("entry block must exist");
+}
+
+pub fn simplify_redundant_branches(program: &mut IrProgram) -> Result<(), Vec<CompilerError>> {
+    let mut errors = Vec::new();
+
+    for function in &mut program.functions {
+        if let Err(error) = simplify_redundant_branches_function(function) {
+            errors.extend(error);
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+fn simplify_redundant_branches_function(
+    function: &mut IrFunction,
+) -> Result<(), Vec<CompilerError>> {
+    for block in &mut function.blocks {
+        if let Terminator::Branch {
+            then_block,
+            else_block,
+            ..
+        } = block.terminator
+        {
+            if then_block == else_block {
+                block.terminator = Terminator::Jump(then_block);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub fn thread_jumps(program: &mut IrProgram) -> Result<(), Vec<CompilerError>> {
+    let mut errors = Vec::new();
+
+    for function in &mut program.functions {
+        if let Err(error) = thread_jumps_function(function) {
+            errors.extend(error);
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+fn thread_jumps_function(function: &mut IrFunction) -> Result<(), Vec<CompilerError>> {
+    loop {
+        let mut changed = false;
+
+        let destinations: HashMap<BlockId, BlockId> = function
+            .blocks
+            .iter()
+            .filter_map(|block| {
+                if block.instructions.is_empty() {
+                    if let Terminator::Jump(destination) = block.terminator {
+                        if destination != block.id {
+                            return Some((block.id, destination));
+                        }
+                    }
+                }
+
+                None
+            })
+            .collect();
+
+        for block in &mut function.blocks {
+            match &mut block.terminator {
+                Terminator::Jump(target) => {
+                    if let Some(destination) = destinations.get(target) {
+                        *target = *destination;
+                        changed = true;
+                    }
+                }
+
+                Terminator::Branch {
+                    then_block,
+                    else_block,
+                    ..
+                } => {
+                    if let Some(destination) = destinations.get(then_block) {
+                        *then_block = *destination;
+                        changed = true;
+                    }
+
+                    if let Some(destination) = destinations.get(else_block) {
+                        *else_block = *destination;
+                        changed = true;
+                    }
+                }
+
+                Terminator::Return { .. } | Terminator::Unreachable => {}
+            }
+        }
+
+        if !changed {
+            break;
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1660,5 +2174,839 @@ mod tests {
                 source: ValueId(2),
             }
         ));
+    }
+
+    #[test]
+    fn folds_equal_to_const_bool_true() {
+        let function = IrFunction {
+            id: Some(FunctionId(0)),
+            name: "equal_fold_test".to_string(),
+            owner: None,
+            parameters: Vec::new(),
+            locals: Vec::new(),
+            return_type: IrType::Bool,
+            entry: BlockId(0),
+            blocks: vec![BasicBlock {
+                id: BlockId(0),
+                instructions: vec![
+                    IrInstruction::ConstInt {
+                        destination: ValueId(0),
+                        value: 42,
+                    },
+                    IrInstruction::ConstInt {
+                        destination: ValueId(1),
+                        value: 42,
+                    },
+                    IrInstruction::Binary {
+                        destination: ValueId(2),
+                        op: IrBinaryOp::Equal,
+                        left: ValueId(0),
+                        right: ValueId(1),
+                    },
+                ],
+                terminator: Terminator::Return {
+                    value: Some(ValueId(2)),
+                },
+            }],
+        };
+
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![function],
+        };
+
+        constant_fold(&mut program).expect("constant folding should succeed");
+
+        assert!(matches!(
+            program.functions[0].blocks[0].instructions[2],
+            IrInstruction::ConstBool {
+                destination: ValueId(2),
+                value: true,
+            }
+        ));
+    }
+
+    #[test]
+    fn folds_equal_to_const_bool_false() {
+        let function = IrFunction {
+            id: Some(FunctionId(0)),
+            name: "equal_fold_test".to_string(),
+            owner: None,
+            parameters: Vec::new(),
+            locals: Vec::new(),
+            return_type: IrType::Bool,
+            entry: BlockId(0),
+            blocks: vec![BasicBlock {
+                id: BlockId(0),
+                instructions: vec![
+                    IrInstruction::ConstInt {
+                        destination: ValueId(0),
+                        value: 42,
+                    },
+                    IrInstruction::ConstInt {
+                        destination: ValueId(1),
+                        value: 99,
+                    },
+                    IrInstruction::Binary {
+                        destination: ValueId(2),
+                        op: IrBinaryOp::Equal,
+                        left: ValueId(0),
+                        right: ValueId(1),
+                    },
+                ],
+                terminator: Terminator::Return {
+                    value: Some(ValueId(2)),
+                },
+            }],
+        };
+
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![function],
+        };
+
+        constant_fold(&mut program).expect("constant folding should succeed");
+
+        assert!(matches!(
+            program.functions[0].blocks[0].instructions[2],
+            IrInstruction::ConstBool {
+                destination: ValueId(2),
+                value: false,
+            }
+        ));
+    }
+
+    #[test]
+    fn preserves_call_even_when_result_is_unused() {
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![IrFunction {
+                id: None,
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Void,
+                entry: BlockId(0),
+                blocks: vec![BasicBlock {
+                    id: BlockId(0),
+                    instructions: vec![IrInstruction::Call {
+                        destination: Some(ValueId(1)),
+                        function: FunctionId(0),
+                        arguments: Vec::new(),
+                    }],
+                    terminator: Terminator::Return { value: None },
+                }],
+            }],
+        };
+
+        eliminate_dead_code(&mut program).unwrap();
+
+        assert!(matches!(
+            program.functions[0].blocks[0].instructions.as_slice(),
+            [IrInstruction::Call { .. }]
+        ));
+    }
+
+    #[test]
+    fn preserves_value_used_by_successor_block() {
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![IrFunction {
+                id: None,
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Int,
+                entry: BlockId(0),
+                blocks: vec![
+                    BasicBlock {
+                        id: BlockId(0),
+                        instructions: vec![IrInstruction::ConstInt {
+                            destination: ValueId(1),
+                            value: 42,
+                        }],
+                        terminator: Terminator::Jump(BlockId(1)),
+                    },
+                    BasicBlock {
+                        id: BlockId(1),
+                        instructions: vec![IrInstruction::Copy {
+                            destination: ValueId(2),
+                            source: ValueId(1),
+                        }],
+                        terminator: Terminator::Return {
+                            value: Some(ValueId(2)),
+                        },
+                    },
+                ],
+            }],
+        };
+
+        eliminate_dead_code(&mut program).unwrap();
+
+        assert!(matches!(
+            program.functions[0].blocks[0].instructions.as_slice(),
+            [IrInstruction::ConstInt {
+                destination: ValueId(1),
+                value: 42
+            }]
+        ));
+
+        assert!(matches!(
+            program.functions[0].blocks[1].instructions.as_slice(),
+            [IrInstruction::Copy {
+                destination: ValueId(2),
+                source: ValueId(1)
+            }]
+        ));
+    }
+
+    #[test]
+    fn simplifies_true_constant_branch() {
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![IrFunction {
+                id: None,
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Void,
+                entry: BlockId(0),
+                blocks: vec![
+                    BasicBlock {
+                        id: BlockId(0),
+                        instructions: vec![IrInstruction::ConstBool {
+                            destination: ValueId(0),
+                            value: true,
+                        }],
+                        terminator: Terminator::Branch {
+                            condition: ValueId(0),
+                            then_block: BlockId(1),
+                            else_block: BlockId(2),
+                        },
+                    },
+                    BasicBlock {
+                        id: BlockId(1),
+                        instructions: Vec::new(),
+                        terminator: Terminator::Return { value: None },
+                    },
+                    BasicBlock {
+                        id: BlockId(2),
+                        instructions: Vec::new(),
+                        terminator: Terminator::Return { value: None },
+                    },
+                ],
+            }],
+        };
+
+        simplify_constant_branches(&mut program).unwrap();
+
+        assert_eq!(
+            program.functions[0].blocks[0].terminator,
+            Terminator::Jump(BlockId(1))
+        );
+    }
+
+    #[test]
+    fn simplifies_false_constant_branch() {
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![IrFunction {
+                id: None,
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Void,
+                entry: BlockId(0),
+                blocks: vec![
+                    BasicBlock {
+                        id: BlockId(0),
+                        instructions: vec![IrInstruction::ConstBool {
+                            destination: ValueId(0),
+                            value: false,
+                        }],
+                        terminator: Terminator::Branch {
+                            condition: ValueId(0),
+                            then_block: BlockId(1),
+                            else_block: BlockId(2),
+                        },
+                    },
+                    BasicBlock {
+                        id: BlockId(1),
+                        instructions: Vec::new(),
+                        terminator: Terminator::Return { value: None },
+                    },
+                    BasicBlock {
+                        id: BlockId(2),
+                        instructions: Vec::new(),
+                        terminator: Terminator::Return { value: None },
+                    },
+                ],
+            }],
+        };
+
+        simplify_constant_branches(&mut program).unwrap();
+
+        assert_eq!(
+            program.functions[0].blocks[0].terminator,
+            Terminator::Jump(BlockId(2))
+        );
+    }
+
+    #[test]
+    fn simplifies_constant_branch_through_copy() {
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![IrFunction {
+                id: None,
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Void,
+                entry: BlockId(0),
+                blocks: vec![
+                    BasicBlock {
+                        id: BlockId(0),
+                        instructions: vec![
+                            IrInstruction::ConstBool {
+                                destination: ValueId(0),
+                                value: true,
+                            },
+                            IrInstruction::Copy {
+                                destination: ValueId(1),
+                                source: ValueId(0),
+                            },
+                        ],
+                        terminator: Terminator::Branch {
+                            condition: ValueId(1),
+                            then_block: BlockId(1),
+                            else_block: BlockId(2),
+                        },
+                    },
+                    BasicBlock {
+                        id: BlockId(1),
+                        instructions: Vec::new(),
+                        terminator: Terminator::Return { value: None },
+                    },
+                    BasicBlock {
+                        id: BlockId(2),
+                        instructions: Vec::new(),
+                        terminator: Terminator::Return { value: None },
+                    },
+                ],
+            }],
+        };
+
+        simplify_constant_branches(&mut program).unwrap();
+
+        assert_eq!(
+            program.functions[0].blocks[0].terminator,
+            Terminator::Jump(BlockId(1))
+        );
+    }
+
+    #[test]
+    fn simplifies_constant_branch_when_predecessors_agree() {
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![IrFunction {
+                id: None,
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Void,
+                entry: BlockId(0),
+                blocks: vec![
+                    BasicBlock {
+                        id: BlockId(0),
+                        instructions: vec![IrInstruction::ConstBool {
+                            destination: ValueId(0),
+                            value: true,
+                        }],
+                        terminator: Terminator::Branch {
+                            condition: ValueId(0),
+                            then_block: BlockId(1),
+                            else_block: BlockId(2),
+                        },
+                    },
+                    BasicBlock {
+                        id: BlockId(1),
+                        instructions: vec![IrInstruction::ConstBool {
+                            destination: ValueId(1),
+                            value: true,
+                        }],
+                        terminator: Terminator::Jump(BlockId(3)),
+                    },
+                    BasicBlock {
+                        id: BlockId(2),
+                        instructions: vec![IrInstruction::ConstBool {
+                            destination: ValueId(1),
+                            value: true,
+                        }],
+                        terminator: Terminator::Jump(BlockId(3)),
+                    },
+                    BasicBlock {
+                        id: BlockId(3),
+                        instructions: Vec::new(),
+                        terminator: Terminator::Branch {
+                            condition: ValueId(1),
+                            then_block: BlockId(4),
+                            else_block: BlockId(5),
+                        },
+                    },
+                    BasicBlock {
+                        id: BlockId(4),
+                        instructions: Vec::new(),
+                        terminator: Terminator::Return { value: None },
+                    },
+                    BasicBlock {
+                        id: BlockId(5),
+                        instructions: Vec::new(),
+                        terminator: Terminator::Return { value: None },
+                    },
+                ],
+            }],
+        };
+
+        simplify_constant_branches(&mut program).unwrap();
+
+        assert_eq!(
+            program.functions[0].blocks[3].terminator,
+            Terminator::Jump(BlockId(4))
+        );
+    }
+
+    #[test]
+    fn does_not_simplify_constant_branch_when_predecessors_disagree() {
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![IrFunction {
+                id: None,
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Void,
+                entry: BlockId(0),
+                blocks: vec![
+                    BasicBlock {
+                        id: BlockId(0),
+                        instructions: vec![IrInstruction::ConstBool {
+                            destination: ValueId(0),
+                            value: true,
+                        }],
+                        terminator: Terminator::Branch {
+                            condition: ValueId(0),
+                            then_block: BlockId(1),
+                            else_block: BlockId(2),
+                        },
+                    },
+                    BasicBlock {
+                        id: BlockId(1),
+                        instructions: vec![IrInstruction::ConstBool {
+                            destination: ValueId(1),
+                            value: true,
+                        }],
+                        terminator: Terminator::Jump(BlockId(3)),
+                    },
+                    BasicBlock {
+                        id: BlockId(2),
+                        instructions: vec![IrInstruction::ConstBool {
+                            destination: ValueId(1),
+                            value: false,
+                        }],
+                        terminator: Terminator::Jump(BlockId(3)),
+                    },
+                    BasicBlock {
+                        id: BlockId(3),
+                        instructions: Vec::new(),
+                        terminator: Terminator::Branch {
+                            condition: ValueId(1),
+                            then_block: BlockId(4),
+                            else_block: BlockId(5),
+                        },
+                    },
+                    BasicBlock {
+                        id: BlockId(4),
+                        instructions: Vec::new(),
+                        terminator: Terminator::Return { value: None },
+                    },
+                    BasicBlock {
+                        id: BlockId(5),
+                        instructions: Vec::new(),
+                        terminator: Terminator::Return { value: None },
+                    },
+                ],
+            }],
+        };
+
+        simplify_constant_branches(&mut program).unwrap();
+
+        assert_eq!(
+            program.functions[0].blocks[3].terminator,
+            Terminator::Branch {
+                condition: ValueId(1),
+                then_block: BlockId(4),
+                else_block: BlockId(5),
+            }
+        );
+    }
+
+    #[test]
+    fn removes_unreachable_blocks_and_rewrites_block_ids() {
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![IrFunction {
+                id: None,
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Void,
+                entry: BlockId(0),
+                blocks: vec![
+                    BasicBlock {
+                        id: BlockId(0),
+                        instructions: Vec::new(),
+                        terminator: Terminator::Jump(BlockId(2)),
+                    },
+                    BasicBlock {
+                        id: BlockId(1),
+                        instructions: vec![IrInstruction::ConstInt {
+                            destination: ValueId(0),
+                            value: 999,
+                        }],
+                        terminator: Terminator::Return {
+                            value: Some(ValueId(0)),
+                        },
+                    },
+                    BasicBlock {
+                        id: BlockId(2),
+                        instructions: vec![IrInstruction::ConstInt {
+                            destination: ValueId(1),
+                            value: 42,
+                        }],
+                        terminator: Terminator::Return {
+                            value: Some(ValueId(1)),
+                        },
+                    },
+                ],
+            }],
+        };
+
+        remove_unreachable_blocks(&mut program).unwrap();
+
+        let function = &program.functions[0];
+
+        assert_eq!(function.blocks.len(), 2);
+
+        assert_eq!(function.blocks[0].id, BlockId(0));
+        assert_eq!(function.blocks[1].id, BlockId(1));
+
+        assert_eq!(function.blocks[0].terminator, Terminator::Jump(BlockId(1)));
+
+        assert!(matches!(
+            function.blocks[1].instructions.as_slice(),
+            [IrInstruction::ConstInt {
+                destination: ValueId(1),
+                value: 42
+            }]
+        ));
+    }
+
+    #[test]
+    fn removes_empty_jump_block() {
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![IrFunction {
+                id: None,
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Void,
+                entry: BlockId(0),
+                blocks: vec![
+                    BasicBlock {
+                        id: BlockId(0),
+                        instructions: Vec::new(),
+                        terminator: Terminator::Jump(BlockId(1)),
+                    },
+                    BasicBlock {
+                        id: BlockId(1),
+                        instructions: Vec::new(),
+                        terminator: Terminator::Jump(BlockId(2)),
+                    },
+                    BasicBlock {
+                        id: BlockId(2),
+                        instructions: vec![IrInstruction::ConstInt {
+                            destination: ValueId(0),
+                            value: 42,
+                        }],
+                        terminator: Terminator::Return {
+                            value: Some(ValueId(0)),
+                        },
+                    },
+                ],
+            }],
+        };
+
+        remove_empty_blocks(&mut program).unwrap();
+
+        let function = &program.functions[0];
+
+        assert_eq!(function.blocks.len(), 2);
+
+        assert_eq!(function.blocks[0].id, BlockId(0));
+        assert_eq!(function.blocks[1].id, BlockId(1));
+
+        assert_eq!(function.blocks[0].terminator, Terminator::Jump(BlockId(1)));
+
+        assert!(matches!(
+            function.blocks[1].instructions.as_slice(),
+            [IrInstruction::ConstInt {
+                destination: ValueId(0),
+                value: 42
+            }]
+        ));
+    }
+
+    #[test]
+    fn threads_branch_target_through_empty_block() {
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![IrFunction {
+                id: None,
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Int,
+                entry: BlockId(0),
+                blocks: vec![
+                    BasicBlock {
+                        id: BlockId(0),
+                        instructions: Vec::new(),
+                        terminator: Terminator::Branch {
+                            condition: ValueId(0),
+                            then_block: BlockId(1),
+                            else_block: BlockId(2),
+                        },
+                    },
+                    BasicBlock {
+                        id: BlockId(1),
+                        instructions: Vec::new(),
+                        terminator: Terminator::Jump(BlockId(3)),
+                    },
+                    BasicBlock {
+                        id: BlockId(2),
+                        instructions: Vec::new(),
+                        terminator: Terminator::Return { value: None },
+                    },
+                    BasicBlock {
+                        id: BlockId(3),
+                        instructions: Vec::new(),
+                        terminator: Terminator::Return { value: None },
+                    },
+                ],
+            }],
+        };
+
+        thread_jumps(&mut program).expect("jump threading should succeed");
+
+        assert_eq!(
+            program.functions[0].blocks[0].terminator,
+            Terminator::Branch {
+                condition: ValueId(0),
+                then_block: BlockId(3),
+                else_block: BlockId(2),
+            }
+        );
+    }
+
+    #[test]
+    fn threads_jump_through_empty_block() {
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![IrFunction {
+                id: None,
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Int,
+                entry: BlockId(0),
+                blocks: vec![
+                    BasicBlock {
+                        id: BlockId(0),
+                        instructions: Vec::new(),
+                        terminator: Terminator::Jump(BlockId(1)),
+                    },
+                    BasicBlock {
+                        id: BlockId(1),
+                        instructions: Vec::new(),
+                        terminator: Terminator::Jump(BlockId(2)),
+                    },
+                    BasicBlock {
+                        id: BlockId(2),
+                        instructions: Vec::new(),
+                        terminator: Terminator::Return { value: None },
+                    },
+                ],
+            }],
+        };
+
+        thread_jumps(&mut program).expect("jump threading should succeed");
+
+        assert_eq!(
+            program.functions[0].blocks[0].terminator,
+            Terminator::Jump(BlockId(2))
+        );
+    }
+
+    #[test]
+    fn does_not_thread_through_non_empty_block() {
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![IrFunction {
+                id: None,
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Int,
+                entry: BlockId(0),
+                blocks: vec![
+                    BasicBlock {
+                        id: BlockId(0),
+                        instructions: Vec::new(),
+                        terminator: Terminator::Jump(BlockId(1)),
+                    },
+                    BasicBlock {
+                        id: BlockId(1),
+                        instructions: vec![IrInstruction::ConstInt {
+                            destination: ValueId(0),
+                            value: 42,
+                        }],
+                        terminator: Terminator::Jump(BlockId(2)),
+                    },
+                    BasicBlock {
+                        id: BlockId(2),
+                        instructions: Vec::new(),
+                        terminator: Terminator::Return { value: None },
+                    },
+                ],
+            }],
+        };
+
+        thread_jumps(&mut program).expect("jump threading should succeed");
+
+        assert_eq!(
+            program.functions[0].blocks[0].terminator,
+            Terminator::Jump(BlockId(1))
+        );
+    }
+
+    #[test]
+    fn threads_multiple_empty_jump_blocks() {
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![IrFunction {
+                id: None,
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Int,
+                entry: BlockId(0),
+                blocks: vec![
+                    BasicBlock {
+                        id: BlockId(0),
+                        instructions: Vec::new(),
+                        terminator: Terminator::Jump(BlockId(1)),
+                    },
+                    BasicBlock {
+                        id: BlockId(1),
+                        instructions: Vec::new(),
+                        terminator: Terminator::Jump(BlockId(2)),
+                    },
+                    BasicBlock {
+                        id: BlockId(2),
+                        instructions: Vec::new(),
+                        terminator: Terminator::Jump(BlockId(3)),
+                    },
+                    BasicBlock {
+                        id: BlockId(3),
+                        instructions: Vec::new(),
+                        terminator: Terminator::Return { value: None },
+                    },
+                ],
+            }],
+        };
+
+        thread_jumps(&mut program).expect("jump threading should succeed");
+
+        assert_eq!(
+            program.functions[0].blocks[0].terminator,
+            Terminator::Jump(BlockId(3))
+        );
+    }
+
+    #[test]
+    fn threading_can_expose_redundant_branch() {
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![IrFunction {
+                id: None,
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Int,
+                entry: BlockId(0),
+                blocks: vec![
+                    BasicBlock {
+                        id: BlockId(0),
+                        instructions: Vec::new(),
+                        terminator: Terminator::Branch {
+                            condition: ValueId(0),
+                            then_block: BlockId(1),
+                            else_block: BlockId(2),
+                        },
+                    },
+                    BasicBlock {
+                        id: BlockId(1),
+                        instructions: Vec::new(),
+                        terminator: Terminator::Jump(BlockId(3)),
+                    },
+                    BasicBlock {
+                        id: BlockId(2),
+                        instructions: Vec::new(),
+                        terminator: Terminator::Jump(BlockId(3)),
+                    },
+                    BasicBlock {
+                        id: BlockId(3),
+                        instructions: Vec::new(),
+                        terminator: Terminator::Return { value: None },
+                    },
+                ],
+            }],
+        };
+
+        thread_jumps(&mut program).expect("jump threading should succeed");
+
+        assert_eq!(
+            program.functions[0].blocks[0].terminator,
+            Terminator::Branch {
+                condition: ValueId(0),
+                then_block: BlockId(3),
+                else_block: BlockId(3),
+            }
+        );
     }
 }

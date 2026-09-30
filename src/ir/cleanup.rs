@@ -429,6 +429,7 @@ fn is_pure_instruction(instruction: &IrInstruction) -> bool {
         IrInstruction::ConstInt { .. }
             | IrInstruction::ConstString { .. }
             | IrInstruction::ConstBool { .. }
+            | IrInstruction::LoadLocal { .. }
             | IrInstruction::Copy { .. }
             | IrInstruction::Binary { .. }
             | IrInstruction::LoadField { .. }
@@ -5372,5 +5373,107 @@ mod tests {
                 source: ValueId(1),
             }
         ));
+    }
+
+    #[test]
+    fn eliminates_unused_load() {
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![IrFunction {
+                id: None,
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: vec![IrLocal {
+                    id: LocalId(0),
+                    name: "x".to_string(),
+                    ty: IrType::Int,
+                }],
+                return_type: IrType::Int,
+                entry: BlockId(0),
+                blocks: vec![BasicBlock {
+                    id: BlockId(0),
+                    instructions: vec![
+                        IrInstruction::ConstInt {
+                            destination: ValueId(0),
+                            value: 42,
+                        },
+                        IrInstruction::StoreLocal {
+                            local: LocalId(0),
+                            value: ValueId(0),
+                        },
+                        IrInstruction::LoadLocal {
+                            destination: ValueId(1),
+                            local: LocalId(0),
+                        },
+                    ],
+                    terminator: Terminator::Return {
+                        value: Some(ValueId(0)),
+                    },
+                }],
+            }],
+        };
+
+        eliminate_dead_code(&mut program).expect("optimization should succeed");
+
+        let instructions = &program.functions[0].blocks[0].instructions;
+
+        assert!(!instructions
+            .iter()
+            .any(|instruction| { matches!(instruction, IrInstruction::LoadLocal { .. }) }));
+    }
+
+    #[test]
+    fn preserves_load_used_by_return() {
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![IrFunction {
+                id: None,
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: vec![IrLocal {
+                    id: LocalId(0),
+                    name: "x".to_string(),
+                    ty: IrType::Int,
+                }],
+                return_type: IrType::Int,
+                entry: BlockId(0),
+                blocks: vec![BasicBlock {
+                    id: BlockId(0),
+                    instructions: vec![
+                        IrInstruction::ConstInt {
+                            destination: ValueId(0),
+                            value: 42,
+                        },
+                        IrInstruction::StoreLocal {
+                            local: LocalId(0),
+                            value: ValueId(0),
+                        },
+                        IrInstruction::LoadLocal {
+                            destination: ValueId(1),
+                            local: LocalId(0),
+                        },
+                    ],
+                    terminator: Terminator::Return {
+                        value: Some(ValueId(1)),
+                    },
+                }],
+            }],
+        };
+
+        eliminate_dead_code(&mut program).expect("optimization should succeed");
+
+        let instructions = &program.functions[0].blocks[0].instructions;
+
+        assert!(instructions.iter().any(|instruction| {
+            matches!(
+                instruction,
+                IrInstruction::LoadLocal {
+                    destination: ValueId(1),
+                    local: LocalId(0),
+                }
+            )
+        }));
     }
 }

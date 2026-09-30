@@ -51,6 +51,8 @@ pub fn compile(source: &str) -> Result<ir::IrProgram, Vec<CompilerError>> {
 
     ir::cleanup::gvn_cse(&mut ir)?;
 
+    ir::cleanup::forward_local_stores(&mut ir)?;
+
     // Copy propagation
     ir::cleanup::copy_propagate(&mut ir)?;
 

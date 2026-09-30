@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::{
     compiler::error::CompilerError,
     ir::{BlockId, IrInstruction, Terminator, ValueId},
+    semantic::symbols::LocalId,
 };
 
 use super::ir::{IrBinaryOp, IrFunction, IrProgram};
@@ -935,6 +936,142 @@ fn copy_propagate_function(function: &mut IrFunction) -> Result<(), Vec<Compiler
     Ok(())
 }
 
+pub fn forward_local_stores(program: &mut IrProgram) -> Result<(), Vec<CompilerError>> {
+    let mut errors = Vec::new();
+
+    for function in &mut program.functions {
+        if let Err(error) = forward_local_stores_function(function) {
+            errors.extend(error);
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+fn forward_local_stores_function(function: &mut IrFunction) -> Result<(), Vec<CompilerError>> {
+    let predecessors = build_predecessors(function);
+
+    let mut in_facts = HashMap::<BlockId, HashMap<LocalId, ValueId>>::new();
+    let mut out_facts = HashMap::<BlockId, HashMap<LocalId, ValueId>>::new();
+
+    in_facts.insert(function.entry, HashMap::new());
+
+    loop {
+        let mut changed = false;
+
+        for block in &function.blocks {
+            let block_id = block.id;
+
+            let new_in = if block_id == function.entry {
+                HashMap::new()
+            } else {
+                let preds = predecessors.get(&block_id).cloned().unwrap_or_default();
+
+                if preds.is_empty() {
+                    HashMap::new()
+                } else {
+                    intersect_local_facts(&preds, &out_facts)
+                }
+            };
+
+            if in_facts.get(&block_id) != Some(&new_in) {
+                in_facts.insert(block_id, new_in.clone());
+                changed = true;
+            }
+
+            let mut facts = new_in;
+
+            for instruction in &block.instructions {
+                match instruction {
+                    IrInstruction::StoreLocal { local, value } => {
+                        facts.insert(*local, *value);
+                    }
+
+                    IrInstruction::LoadLocal { destination, local } => {
+                        facts.insert(*local, *destination);
+                    }
+
+                    _ => {}
+                }
+            }
+
+            if out_facts.get(&block_id) != Some(&facts) {
+                out_facts.insert(block_id, facts);
+                changed = true;
+            }
+        }
+
+        if !changed {
+            break;
+        }
+    }
+
+    for block in &mut function.blocks {
+        let mut facts = in_facts.get(&block.id).cloned().unwrap_or_default();
+
+        for instruction in &mut block.instructions {
+            let replacement = match instruction {
+                IrInstruction::LoadLocal { destination, local } => {
+                    facts.get(local).copied().map(|source| IrInstruction::Copy {
+                        destination: *destination,
+                        source,
+                    })
+                }
+
+                _ => None,
+            };
+
+            if let Some(replacement) = replacement {
+                *instruction = replacement;
+            }
+
+            match instruction {
+                IrInstruction::StoreLocal { local, value } => {
+                    facts.insert(*local, *value);
+                }
+
+                IrInstruction::LoadLocal { destination, local } => {
+                    facts.insert(*local, *destination);
+                }
+
+                _ => {}
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn intersect_local_facts(
+    predecessors: &[BlockId],
+    out_facts: &HashMap<BlockId, HashMap<LocalId, ValueId>>,
+) -> HashMap<LocalId, ValueId> {
+    let Some(first) = predecessors.first() else {
+        return HashMap::new();
+    };
+
+    let Some(first_facts) = out_facts.get(first) else {
+        return HashMap::new();
+    };
+
+    let mut result = first_facts.clone();
+
+    for predecessor in &predecessors[1..] {
+        let Some(facts) = out_facts.get(predecessor) else {
+            result.clear();
+            break;
+        };
+
+        result.retain(|local, value| facts.get(local) == Some(value));
+    }
+
+    result
+}
+
 fn build_predecessors(function: &IrFunction) -> HashMap<BlockId, Vec<BlockId>> {
     let mut predecessors = HashMap::<BlockId, Vec<BlockId>>::new();
 
@@ -1625,7 +1762,7 @@ mod tests {
     use crate::ir::ir::{
         BasicBlock, IrFunction, IrInstruction, IrProgram, IrType, Terminator, ValueId,
     };
-    use crate::ir::BlockId;
+    use crate::ir::{BlockId, IrLocal};
     use crate::semantic::symbols::{FunctionId, LocalId};
 
     fn function_with_unreachable_block() -> IrFunction {
@@ -4148,6 +4285,198 @@ mod tests {
             IrInstruction::Copy {
                 destination: ValueId(6),
                 source: ValueId(5),
+            }
+        ));
+    }
+
+    #[test]
+    fn forwards_store_into_load() {
+        let function = IrFunction {
+            id: Some(FunctionId(0)),
+            name: "test".to_string(),
+            owner: None,
+            parameters: Vec::new(),
+            locals: vec![IrLocal {
+                id: LocalId(0),
+                name: "x".to_string(),
+                ty: IrType::Int,
+            }],
+            return_type: IrType::Int,
+            entry: BlockId(0),
+            blocks: vec![BasicBlock {
+                id: BlockId(0),
+                instructions: vec![
+                    IrInstruction::ConstInt {
+                        destination: ValueId(0),
+                        value: 42,
+                    },
+                    IrInstruction::StoreLocal {
+                        local: LocalId(0),
+                        value: ValueId(0),
+                    },
+                    IrInstruction::LoadLocal {
+                        destination: ValueId(1),
+                        local: LocalId(0),
+                    },
+                ],
+                terminator: Terminator::Return {
+                    value: Some(ValueId(1)),
+                },
+            }],
+        };
+
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![function],
+        };
+
+        forward_local_stores(&mut program).unwrap();
+
+        let function = &program.functions[0];
+
+        assert!(matches!(
+            &function.blocks[0].instructions[2],
+            IrInstruction::Copy {
+                destination: ValueId(1),
+                source: ValueId(0),
+            }
+        ));
+    }
+
+    #[test]
+    fn forwards_store_across_single_predecessor() {
+        let function = IrFunction {
+            id: Some(FunctionId(0)),
+            name: "test".to_string(),
+            owner: None,
+            parameters: Vec::new(),
+            locals: Vec::new(),
+            return_type: IrType::Int,
+            entry: BlockId(0),
+            blocks: vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    instructions: vec![
+                        IrInstruction::ConstInt {
+                            destination: ValueId(0),
+                            value: 42,
+                        },
+                        IrInstruction::StoreLocal {
+                            local: LocalId(0),
+                            value: ValueId(0),
+                        },
+                    ],
+                    terminator: Terminator::Jump(BlockId(1)),
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    instructions: vec![IrInstruction::LoadLocal {
+                        destination: ValueId(1),
+                        local: LocalId(0),
+                    }],
+                    terminator: Terminator::Return {
+                        value: Some(ValueId(1)),
+                    },
+                },
+            ],
+        };
+
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![function],
+        };
+
+        forward_local_stores(&mut program).unwrap();
+
+        let function = &program.functions[0];
+
+        assert!(matches!(
+            &function.blocks[1].instructions[0],
+            IrInstruction::Copy {
+                destination: ValueId(1),
+                source: ValueId(0),
+            }
+        ));
+    }
+
+    #[test]
+    fn does_not_forward_store_when_predecessors_disagree() {
+        let function = IrFunction {
+            id: Some(FunctionId(0)),
+            name: "test".to_string(),
+            owner: None,
+            parameters: Vec::new(),
+            locals: Vec::new(),
+            return_type: IrType::Int,
+            entry: BlockId(0),
+            blocks: vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    instructions: vec![IrInstruction::ConstBool {
+                        destination: ValueId(0),
+                        value: true,
+                    }],
+                    terminator: Terminator::Branch {
+                        condition: ValueId(0),
+                        then_block: BlockId(1),
+                        else_block: BlockId(2),
+                    },
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    instructions: vec![
+                        IrInstruction::ConstInt {
+                            destination: ValueId(1),
+                            value: 10,
+                        },
+                        IrInstruction::StoreLocal {
+                            local: LocalId(0),
+                            value: ValueId(1),
+                        },
+                    ],
+                    terminator: Terminator::Jump(BlockId(3)),
+                },
+                BasicBlock {
+                    id: BlockId(2),
+                    instructions: vec![
+                        IrInstruction::ConstInt {
+                            destination: ValueId(2),
+                            value: 20,
+                        },
+                        IrInstruction::StoreLocal {
+                            local: LocalId(0),
+                            value: ValueId(2),
+                        },
+                    ],
+                    terminator: Terminator::Jump(BlockId(3)),
+                },
+                BasicBlock {
+                    id: BlockId(3),
+                    instructions: vec![IrInstruction::LoadLocal {
+                        destination: ValueId(3),
+                        local: LocalId(0),
+                    }],
+                    terminator: Terminator::Return {
+                        value: Some(ValueId(3)),
+                    },
+                },
+            ],
+        };
+
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![function],
+        };
+
+        forward_local_stores(&mut program).unwrap();
+
+        let function = &program.functions[0];
+
+        assert!(matches!(
+            &function.blocks[3].instructions[0],
+            IrInstruction::LoadLocal {
+                destination: ValueId(3),
+                local: LocalId(0),
             }
         ));
     }

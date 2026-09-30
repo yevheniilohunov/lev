@@ -1772,34 +1772,86 @@ pub fn eliminate_redundant_loads(program: &mut IrProgram) -> Result<(), Vec<Comp
 }
 
 fn eliminate_redundant_loads_function(function: &mut IrFunction) -> Result<(), Vec<CompilerError>> {
-    for block in &mut function.blocks {
-        let mut loaded = HashMap::<LocalId, ValueId>::new();
+    let predecessors = build_predecessors(function);
 
-        for instruction in &mut block.instructions {
-            let replacement =
-                match instruction {
-                    IrInstruction::LoadLocal { destination, local } => loaded
-                        .get(local)
-                        .copied()
-                        .map(|source| IrInstruction::Copy {
-                            destination: *destination,
-                            source,
-                        }),
+    let mut in_facts = HashMap::<BlockId, HashMap<LocalId, ValueId>>::new();
+    let mut out_facts = HashMap::<BlockId, HashMap<LocalId, ValueId>>::new();
 
-                    _ => None,
-                };
+    in_facts.insert(function.entry, HashMap::new());
 
-            if let Some(replacement) = replacement {
-                *instruction = replacement;
+    loop {
+        let mut changed = false;
+
+        for block in &function.blocks {
+            let block_id = block.id;
+
+            let new_in = if block_id == function.entry {
+                HashMap::new()
+            } else {
+                let preds = predecessors.get(&block_id).cloned().unwrap_or_default();
+
+                if preds.is_empty() {
+                    HashMap::new()
+                } else {
+                    intersect_local_facts(&preds, &out_facts)
+                }
+            };
+
+            if in_facts.get(&block_id) != Some(&new_in) {
+                in_facts.insert(block_id, new_in.clone());
+                changed = true;
             }
 
+            let mut facts = new_in;
+
+            for instruction in &block.instructions {
+                match instruction {
+                    IrInstruction::StoreLocal { local, value } => {
+                        facts.insert(*local, *value);
+                    }
+
+                    IrInstruction::LoadLocal { destination, local } => {
+                        facts.insert(*local, *destination);
+                    }
+
+                    _ => {}
+                }
+            }
+
+            if out_facts.get(&block_id) != Some(&facts) {
+                out_facts.insert(block_id, facts);
+                changed = true;
+            }
+        }
+
+        if !changed {
+            break;
+        }
+    }
+
+    for block in &mut function.blocks {
+        let mut facts = in_facts.get(&block.id).cloned().unwrap_or_default();
+
+        for instruction in &mut block.instructions {
             match instruction {
-                IrInstruction::StoreLocal { local, .. } => {
-                    loaded.remove(local);
+                IrInstruction::LoadLocal { destination, local } => {
+                    if let Some(source) = facts.get(local).copied() {
+                        let destination = *destination;
+                        let local = *local;
+
+                        *instruction = IrInstruction::Copy {
+                            destination,
+                            source,
+                        };
+
+                        facts.insert(local, destination);
+                    } else {
+                        facts.insert(*local, *destination);
+                    }
                 }
 
-                IrInstruction::LoadLocal { destination, local } => {
-                    loaded.insert(*local, *destination);
+                IrInstruction::StoreLocal { local, value } => {
+                    facts.insert(*local, *value);
                 }
 
                 _ => {}
@@ -4832,9 +4884,9 @@ mod tests {
 
         assert!(matches!(
             &function.blocks[0].instructions[3],
-            IrInstruction::LoadLocal {
+            IrInstruction::Copy {
                 destination: ValueId(2),
-                local: LocalId(0),
+                source: ValueId(1),
             }
         ));
     }
@@ -5244,5 +5296,81 @@ mod tests {
         let function = &program.functions[0];
 
         assert_eq!(function.blocks.len(), 4);
+    }
+
+    #[test]
+    fn eliminates_redundant_load_when_predecessors_agree() {
+        let function = IrFunction {
+            id: Some(FunctionId(0)),
+            name: "test".to_string(),
+            owner: None,
+            parameters: Vec::new(),
+            locals: Vec::new(),
+            return_type: IrType::Int,
+            entry: BlockId(0),
+            blocks: vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    instructions: vec![
+                        IrInstruction::ConstBool {
+                            destination: ValueId(0),
+                            value: true,
+                        },
+                        IrInstruction::ConstInt {
+                            destination: ValueId(1),
+                            value: 42,
+                        },
+                    ],
+                    terminator: Terminator::Branch {
+                        condition: ValueId(0),
+                        then_block: BlockId(1),
+                        else_block: BlockId(2),
+                    },
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    instructions: vec![IrInstruction::StoreLocal {
+                        local: LocalId(0),
+                        value: ValueId(1),
+                    }],
+                    terminator: Terminator::Jump(BlockId(3)),
+                },
+                BasicBlock {
+                    id: BlockId(2),
+                    instructions: vec![IrInstruction::StoreLocal {
+                        local: LocalId(0),
+                        value: ValueId(1),
+                    }],
+                    terminator: Terminator::Jump(BlockId(3)),
+                },
+                BasicBlock {
+                    id: BlockId(3),
+                    instructions: vec![IrInstruction::LoadLocal {
+                        destination: ValueId(2),
+                        local: LocalId(0),
+                    }],
+                    terminator: Terminator::Return {
+                        value: Some(ValueId(2)),
+                    },
+                },
+            ],
+        };
+
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![function],
+        };
+
+        eliminate_redundant_loads(&mut program).unwrap();
+
+        let function = &program.functions[0];
+
+        assert!(matches!(
+            &function.blocks[3].instructions[0],
+            IrInstruction::Copy {
+                destination: ValueId(2),
+                source: ValueId(1),
+            }
+        ));
     }
 }

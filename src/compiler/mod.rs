@@ -7,13 +7,9 @@ use error::CompilerError;
 
 pub fn compile(source: &str) -> Result<ir::IrProgram, Vec<CompilerError>> {
     let source_file = source::SourceFile::new(source);
-
     let tokens = lexer::lex(&source_file)?;
-
     let ast = parser::parse(&source_file, &tokens)?;
-
     let hir = semantic::analyze(ast, source_file)?;
-
     let mut ir = ir::lower::lower_to_ir(hir)?;
 
     // Validate the CFG before SSA construction.
@@ -25,43 +21,38 @@ pub fn compile(source: &str) -> Result<ir::IrProgram, Vec<CompilerError>> {
     // Validate the resulting SSA IR.
     ir::validate_ssa(&ir)?;
 
+    // Lower Phi nodes back into ordinary copies.
     ir::phi::lower_phis(&mut ir)?;
 
+    // Simplify branches and CFG structure.
     ir::cleanup::simplify_constant_branches(&mut ir)?;
-
     ir::cleanup::simplify_redundant_branches(&mut ir)?;
-
     ir::cleanup::thread_jumps(&mut ir)?;
 
-    // Remove unreachable CFG blocks.
+    // Remove unreachable and unnecessary CFG blocks.
     ir::cleanup::remove_unreachable_blocks(&mut ir)?;
-
     ir::cleanup::remove_empty_blocks(&mut ir)?;
-
     ir::cleanup::merge_linear_blocks(&mut ir)?;
 
     // Validate the cleaned non-SSA IR.
     ir::validate(&ir)?;
 
-    // Propagate known constants.
+    // Propagate and fold constants/algebra first.
     ir::cleanup::constant_propagate(&mut ir)?;
-
     ir::cleanup::simplify_algebraic(&mut ir)?;
-
-    // Fold constant integer expressions.
     ir::cleanup::constant_fold(&mut ir)?;
 
-    ir::cleanup::gvn_cse(&mut ir)?;
-
+    // Simplify local memory operations before GVN/CSE so that
+    // newly exposed copies and values are visible to GVN.
     ir::cleanup::forward_local_stores(&mut ir)?;
-
     ir::cleanup::eliminate_redundant_loads(&mut ir)?;
-
     ir::cleanup::eliminate_dead_stores(&mut ir)?;
 
-    // Copy propagation
-    ir::cleanup::copy_propagate(&mut ir)?;
+    // Global value numbering / common-subexpression elimination.
+    ir::cleanup::gvn_cse(&mut ir)?;
 
+    // Propagate copies exposed by the previous passes.
+    ir::cleanup::copy_propagate(&mut ir)?;
     ir::cleanup::eliminate_redundant_copies(&mut ir)?;
 
     // Remove unused pure instructions.
@@ -405,5 +396,86 @@ mod tests {
             .blocks
             .iter()
             .all(|block| { !matches!(block.terminator, crate::ir::Terminator::Branch { .. }) }));
+    }
+
+    #[test]
+    fn compile_forwards_local_store_into_load() {
+        let source = r#"
+        fn main(): int {
+            let x: int = 42;
+            return x;
+        }
+    "#;
+
+        let program = compile(source).expect("program should compile successfully");
+        let function = &program.functions[0];
+
+        let instructions = function
+            .blocks
+            .iter()
+            .flat_map(|block| block.instructions.iter())
+            .collect::<Vec<_>>();
+
+        assert!(
+            !instructions
+                .iter()
+                .any(|instruction| matches!(instruction, IrInstruction::LoadLocal { .. })),
+            "final IR should not contain LoadLocal"
+        );
+
+        assert!(
+            !instructions
+                .iter()
+                .any(|instruction| matches!(instruction, IrInstruction::StoreLocal { .. })),
+            "final IR should not contain StoreLocal"
+        );
+    }
+
+    #[test]
+    fn compile_removes_overwritten_local_store() {
+        let source = r#"
+        fn main(): int {
+            let x: int = 10;
+            x = 20;
+            return x;
+        }
+    "#;
+
+        let program = compile(source).expect("program should compile successfully");
+        let function = &program.functions[0];
+
+        let instructions = function
+            .blocks
+            .iter()
+            .flat_map(|block| block.instructions.iter())
+            .collect::<Vec<_>>();
+
+        assert!(
+            !instructions
+                .iter()
+                .any(|instruction| matches!(instruction, IrInstruction::LoadLocal { .. })),
+            "final IR should not contain LoadLocal"
+        );
+
+        assert!(
+            !instructions
+                .iter()
+                .any(|instruction| matches!(instruction, IrInstruction::StoreLocal { .. })),
+            "final IR should not contain StoreLocal"
+        );
+
+        assert!(
+            instructions.iter().any(|instruction| {
+                matches!(instruction, IrInstruction::ConstInt { value: 20, .. })
+            }),
+            "final IR should still contain the returned value"
+        );
+
+        assert!(
+            !instructions.iter().any(|instruction| {
+                matches!(instruction, IrInstruction::ConstInt { value: 10, .. })
+            }),
+            "overwritten value should be eliminated"
+        );
     }
 }

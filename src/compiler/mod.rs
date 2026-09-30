@@ -49,6 +49,8 @@ pub fn compile(source: &str) -> Result<ir::IrProgram, Vec<CompilerError>> {
     // Fold constant integer expressions.
     ir::cleanup::constant_fold(&mut ir)?;
 
+    ir::cleanup::gvn_cse(&mut ir)?;
+
     // Copy propagation
     ir::cleanup::copy_propagate(&mut ir)?;
 

@@ -7,6 +7,152 @@ use crate::{
 
 use super::ir::{IrBinaryOp, IrFunction, IrProgram};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct GvnExpression {
+    op: IrBinaryOp,
+    left: ValueId,
+    right: ValueId,
+}
+
+pub fn gvn_cse(program: &mut IrProgram) -> Result<(), Vec<CompilerError>> {
+    let mut errors = Vec::new();
+
+    for function in &mut program.functions {
+        if let Err(error) = gvn_cse_function(function) {
+            errors.extend(error);
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+fn gvn_cse_function(function: &mut IrFunction) -> Result<(), Vec<CompilerError>> {
+    let predecessors = build_predecessors(function);
+
+    let mut in_facts = HashMap::<BlockId, HashMap<GvnExpression, ValueId>>::new();
+
+    let mut out_facts = HashMap::<BlockId, HashMap<GvnExpression, ValueId>>::new();
+
+    in_facts.insert(function.entry, HashMap::new());
+
+    loop {
+        let mut changed = false;
+
+        for block in &function.blocks {
+            let block_id = block.id;
+
+            let new_in = if block_id == function.entry {
+                HashMap::new()
+            } else {
+                let preds = predecessors.get(&block_id).cloned().unwrap_or_default();
+
+                if preds.is_empty() {
+                    HashMap::new()
+                } else {
+                    intersect_gvn_facts(&preds, &out_facts)
+                }
+            };
+
+            if in_facts.get(&block_id) != Some(&new_in) {
+                in_facts.insert(block_id, new_in.clone());
+                changed = true;
+            }
+
+            let mut facts = new_in;
+
+            for instruction in &block.instructions {
+                if let IrInstruction::Binary {
+                    destination,
+                    op,
+                    left,
+                    right,
+                } = instruction
+                {
+                    let (left, right) = canonical_gvn_operands(*op, *left, *right);
+
+                    let expression = GvnExpression {
+                        op: *op,
+                        left,
+                        right,
+                    };
+
+                    facts.insert(expression, *destination);
+                }
+            }
+
+            if out_facts.get(&block_id) != Some(&facts) {
+                out_facts.insert(block_id, facts);
+                changed = true;
+            }
+        }
+
+        if !changed {
+            break;
+        }
+    }
+
+    for block in &mut function.blocks {
+        let mut facts = in_facts.get(&block.id).cloned().unwrap_or_default();
+
+        for instruction in &mut block.instructions {
+            let replacement = match instruction {
+                IrInstruction::Binary {
+                    destination,
+                    op,
+                    left,
+                    right,
+                } => {
+                    let (left, right) = canonical_gvn_operands(*op, *left, *right);
+
+                    let expression = GvnExpression {
+                        op: *op,
+                        left,
+                        right,
+                    };
+
+                    if let Some(existing) = facts.get(&expression).copied() {
+                        if existing != *destination {
+                            Some(IrInstruction::Copy {
+                                destination: *destination,
+                                source: existing,
+                            })
+                        } else {
+                            None
+                        }
+                    } else {
+                        facts.insert(expression, *destination);
+                        None
+                    }
+                }
+                _ => None,
+            };
+
+            if let Some(replacement) = replacement {
+                *instruction = replacement;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn canonical_gvn_operands(op: IrBinaryOp, left: ValueId, right: ValueId) -> (ValueId, ValueId) {
+    match op {
+        IrBinaryOp::Add | IrBinaryOp::Multiply | IrBinaryOp::Equal => {
+            if left <= right {
+                (left, right)
+            } else {
+                (right, left)
+            }
+        }
+        IrBinaryOp::Subtract | IrBinaryOp::Divide => (left, right),
+    }
+}
+
 pub fn remove_unreachable_blocks(program: &mut IrProgram) -> Result<(), Vec<CompilerError>> {
     let mut errors = Vec::new();
 
@@ -21,6 +167,32 @@ pub fn remove_unreachable_blocks(program: &mut IrProgram) -> Result<(), Vec<Comp
     } else {
         Err(errors)
     }
+}
+
+fn intersect_gvn_facts(
+    predecessors: &[BlockId],
+    out_facts: &HashMap<BlockId, HashMap<GvnExpression, ValueId>>,
+) -> HashMap<GvnExpression, ValueId> {
+    let Some(first) = predecessors.first() else {
+        return HashMap::new();
+    };
+
+    let Some(first_facts) = out_facts.get(first) else {
+        return HashMap::new();
+    };
+
+    let mut result = first_facts.clone();
+
+    for predecessor in &predecessors[1..] {
+        let Some(facts) = out_facts.get(predecessor) else {
+            result.clear();
+            break;
+        };
+
+        result.retain(|expression, value| facts.get(expression) == Some(value));
+    }
+
+    result
 }
 
 fn remove_unreachable_blocks_function(function: &mut IrFunction) -> Result<(), Vec<CompilerError>> {
@@ -3659,6 +3831,182 @@ mod tests {
             IrInstruction::Binary {
                 op: IrBinaryOp::Equal,
                 ..
+            }
+        ));
+    }
+
+    #[test]
+    fn eliminates_redundant_binary_expression() {
+        let function = IrFunction {
+            id: Some(FunctionId(0)),
+            name: "test".to_string(),
+            owner: None,
+            parameters: Vec::new(),
+            locals: Vec::new(),
+            return_type: IrType::Int,
+            entry: BlockId(0),
+            blocks: vec![BasicBlock {
+                id: BlockId(0),
+                instructions: vec![
+                    IrInstruction::ConstInt {
+                        destination: ValueId(0),
+                        value: 10,
+                    },
+                    IrInstruction::ConstInt {
+                        destination: ValueId(1),
+                        value: 20,
+                    },
+                    IrInstruction::Binary {
+                        destination: ValueId(2),
+                        op: IrBinaryOp::Add,
+                        left: ValueId(0),
+                        right: ValueId(1),
+                    },
+                    IrInstruction::Binary {
+                        destination: ValueId(3),
+                        op: IrBinaryOp::Add,
+                        left: ValueId(0),
+                        right: ValueId(1),
+                    },
+                ],
+                terminator: Terminator::Return {
+                    value: Some(ValueId(3)),
+                },
+            }],
+        };
+
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![function],
+        };
+
+        gvn_cse(&mut program).unwrap();
+
+        let instructions = &program.functions[0].blocks[0].instructions;
+
+        assert!(matches!(
+            instructions[3],
+            IrInstruction::Copy {
+                destination: ValueId(3),
+                source: ValueId(2),
+            }
+        ));
+    }
+
+    #[test]
+    fn eliminates_redundant_commutative_expression() {
+        let function = IrFunction {
+            id: Some(FunctionId(0)),
+            name: "test".to_string(),
+            owner: None,
+            parameters: Vec::new(),
+            locals: Vec::new(),
+            return_type: IrType::Int,
+            entry: BlockId(0),
+            blocks: vec![BasicBlock {
+                id: BlockId(0),
+                instructions: vec![
+                    IrInstruction::Parameter {
+                        destination: ValueId(0),
+                        local: LocalId(0),
+                    },
+                    IrInstruction::Parameter {
+                        destination: ValueId(1),
+                        local: LocalId(1),
+                    },
+                    IrInstruction::Binary {
+                        destination: ValueId(2),
+                        op: IrBinaryOp::Add,
+                        left: ValueId(0),
+                        right: ValueId(1),
+                    },
+                    IrInstruction::Binary {
+                        destination: ValueId(3),
+                        op: IrBinaryOp::Add,
+                        left: ValueId(1),
+                        right: ValueId(0),
+                    },
+                ],
+                terminator: Terminator::Return {
+                    value: Some(ValueId(3)),
+                },
+            }],
+        };
+
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![function],
+        };
+
+        gvn_cse(&mut program).unwrap();
+
+        let instructions = &program.functions[0].blocks[0].instructions;
+
+        assert!(matches!(
+            instructions[3],
+            IrInstruction::Copy {
+                destination: ValueId(3),
+                source: ValueId(2),
+            }
+        ));
+    }
+
+    #[test]
+    fn does_not_canonicalize_subtraction() {
+        let function = IrFunction {
+            id: Some(FunctionId(0)),
+            name: "test".to_string(),
+            owner: None,
+            parameters: Vec::new(),
+            locals: Vec::new(),
+            return_type: IrType::Int,
+            entry: BlockId(0),
+            blocks: vec![BasicBlock {
+                id: BlockId(0),
+                instructions: vec![
+                    IrInstruction::Parameter {
+                        destination: ValueId(0),
+                        local: LocalId(0),
+                    },
+                    IrInstruction::Parameter {
+                        destination: ValueId(1),
+                        local: LocalId(1),
+                    },
+                    IrInstruction::Binary {
+                        destination: ValueId(2),
+                        op: IrBinaryOp::Subtract,
+                        left: ValueId(0),
+                        right: ValueId(1),
+                    },
+                    IrInstruction::Binary {
+                        destination: ValueId(3),
+                        op: IrBinaryOp::Subtract,
+                        left: ValueId(1),
+                        right: ValueId(0),
+                    },
+                ],
+                terminator: Terminator::Return {
+                    value: Some(ValueId(3)),
+                },
+            }],
+        };
+
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![function],
+        };
+
+        gvn_cse(&mut program).unwrap();
+
+        let instructions = &program.functions[0].blocks[0].instructions;
+
+        assert!(matches!(
+            instructions[3],
+            IrInstruction::Binary {
+                destination: ValueId(3),
+                op: IrBinaryOp::Subtract,
+                left: ValueId(1),
+                right: ValueId(0),
             }
         ));
     }

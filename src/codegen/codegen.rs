@@ -20,6 +20,15 @@ impl Default for CodegenTarget {
     }
 }
 
+impl CodegenTarget {
+    fn malloc_symbol(self) -> &'static str {
+        match self {
+            CodegenTarget::X86_64MacOS => "_malloc",
+            CodegenTarget::X86_64 => "malloc",
+        }
+    }
+}
+
 pub fn generate(program: &IrProgram, target: CodegenTarget) -> Result<String, Vec<CompilerError>> {
     let mut output = String::new();
 
@@ -181,11 +190,6 @@ impl<'a> FunctionCodegen<'a> {
         for block in &self.function.blocks {
             for instruction in &block.instructions {
                 let (destination, struct_id) = match instruction {
-                    IrInstruction::AllocStruct {
-                        destination,
-                        struct_id,
-                    } => (*destination, *struct_id),
-
                     IrInstruction::StackAllocStruct {
                         destination,
                         struct_id,
@@ -702,14 +706,7 @@ impl<'a> FunctionCodegen<'a> {
                 destination,
                 struct_id,
             } => {
-                let offset = self.struct_storage.get(destination).ok_or_else(|| {
-                    vec![CompilerError::internal(format!(
-                        "no stack storage allocated for struct value {:?}",
-                        destination
-                    ))]
-                })?;
-
-                let _structure = self
+                let structure = self
                     .program
                     .structs
                     .iter()
@@ -721,7 +718,12 @@ impl<'a> FunctionCodegen<'a> {
                         ))]
                     })?;
 
-                writeln!(self.output, "    lea rax, [rbp-{}]", offset)
+                let size = (structure.fields.len() as i32) * 8;
+
+                writeln!(self.output, "    mov rdi, {}", size)
+                    .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+
+                writeln!(self.output, "    call {}", self.target.malloc_symbol())
                     .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
 
                 self.emit_store(*destination, "rax")?;

@@ -8,22 +8,24 @@ mod semantic;
 use std::{env, fs, process};
 
 use crate::codegen::CodegenTarget;
-
+use clap::Parser;
 use miette::Report;
 
-fn main() -> miette::Result<()> {
-    let path = match env::args().nth(1) {
-        Some(path) => path,
-        None => {
-            eprintln!("usage: lev <file.lev>");
-            process::exit(1);
-        }
-    };
+#[derive(Parser, Debug)]
+#[command(name = "lev")]
+#[command(about = "The Lev compiler")]
+struct Cli {
+    /// Input Lev source file
+    input: String,
+}
 
-    let source = match fs::read_to_string(&path) {
+fn main() -> miette::Result<()> {
+    let cli = Cli::parse();
+
+    let source = match fs::read_to_string(&cli.input) {
         Ok(source) => source,
         Err(err) => {
-            eprintln!("failed to read '{}': {}", path, err);
+            eprintln!("failed to read '{}': {}", cli.input, err);
             process::exit(1);
         }
     };

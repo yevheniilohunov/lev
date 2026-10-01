@@ -395,6 +395,7 @@ fn eliminate_dead_code_from_function(function: &mut IrFunction) -> Result<(), Ve
                     | IrInstruction::LoadLocal { .. }
                     | IrInstruction::StoreLocal { .. }
                     | IrInstruction::AllocStruct { .. }
+                    | IrInstruction::StackAllocStruct { .. }
                     | IrInstruction::StoreField { .. } => {}
                 }
             }
@@ -448,6 +449,7 @@ fn instruction_destination(instruction: &IrInstruction) -> Option<ValueId> {
         | IrInstruction::AllocStruct { destination, .. }
         | IrInstruction::LoadField { destination, .. }
         | IrInstruction::Binary { destination, .. }
+        | IrInstruction::StackAllocStruct { destination, .. }
         | IrInstruction::Phi { destination, .. } => Some(*destination),
 
         IrInstruction::Call { destination, .. } => *destination,
@@ -1196,6 +1198,7 @@ fn rewrite_instruction_values(instruction: &mut IrInstruction, copies: &HashMap<
         | IrInstruction::ConstString { .. }
         | IrInstruction::ConstBool { .. }
         | IrInstruction::LoadLocal { .. }
+        | IrInstruction::StackAllocStruct { .. }
         | IrInstruction::AllocStruct { .. } => {}
     }
 }
@@ -2542,6 +2545,90 @@ fn eliminate_dead_field_stores_function(
     Ok(())
 }
 
+pub fn eliminate_dead_stack_allocs(program: &mut IrProgram) -> Result<(), Vec<CompilerError>> {
+    for function in &mut program.functions {
+        let mut used = HashSet::<ValueId>::new();
+
+        // Values used by terminators are live.
+        for block in &function.blocks {
+            match &block.terminator {
+                Terminator::Branch { condition, .. } => {
+                    used.insert(*condition);
+                }
+
+                Terminator::Return { value } => {
+                    if let Some(value) = value {
+                        used.insert(*value);
+                    }
+                }
+
+                Terminator::Jump(_) | Terminator::Unreachable => {}
+            }
+        }
+
+        // Collect every value consumed by an instruction.
+        for block in &function.blocks {
+            for instruction in &block.instructions {
+                match instruction {
+                    IrInstruction::Copy { source, .. } => {
+                        used.insert(*source);
+                    }
+
+                    IrInstruction::StructCopy { source, .. } => {
+                        used.insert(*source);
+                    }
+
+                    IrInstruction::StoreLocal { value, .. } => {
+                        used.insert(*value);
+                    }
+
+                    IrInstruction::StoreField {
+                        receiver, value, ..
+                    } => {
+                        used.insert(*receiver);
+                        used.insert(*value);
+                    }
+
+                    IrInstruction::LoadField { receiver, .. } => {
+                        used.insert(*receiver);
+                    }
+
+                    IrInstruction::Binary { left, right, .. } => {
+                        used.insert(*left);
+                        used.insert(*right);
+                    }
+
+                    IrInstruction::Call { arguments, .. } => {
+                        used.extend(arguments.iter().copied());
+                    }
+
+                    IrInstruction::Phi { sources, .. } => {
+                        used.extend(sources.iter().map(|(_, value)| *value));
+                    }
+
+                    IrInstruction::Parameter { .. }
+                    | IrInstruction::ConstInt { .. }
+                    | IrInstruction::ConstString { .. }
+                    | IrInstruction::ConstBool { .. }
+                    | IrInstruction::LoadLocal { .. }
+                    | IrInstruction::AllocStruct { .. }
+                    | IrInstruction::StackAllocStruct { .. } => {}
+                }
+            }
+        }
+
+        for block in &mut function.blocks {
+            block.instructions.retain(|instruction| match instruction {
+                IrInstruction::StackAllocStruct { destination, .. } => used.contains(destination),
+
+                _ => true,
+            });
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2549,8 +2636,194 @@ mod tests {
     use crate::ir::ir::{
         BasicBlock, IrFunction, IrInstruction, IrProgram, IrType, Terminator, ValueId,
     };
-    use crate::ir::{BlockId, IrLocal};
+    use crate::ir::{BlockId, IrField, IrLocal, IrStruct};
     use crate::semantic::symbols::{FunctionId, LocalId, StructId};
+
+    #[test]
+    fn eliminates_unused_stack_alloc() {
+        let mut program = IrProgram {
+            structs: vec![IrStruct {
+                id: StructId(0),
+                name: "Test".to_string(),
+                base: None,
+                fields: vec![],
+            }],
+            functions: vec![IrFunction {
+                id: Some(FunctionId(0)),
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Void,
+                entry: BlockId(0),
+                blocks: vec![BasicBlock {
+                    id: BlockId(0),
+                    instructions: vec![IrInstruction::StackAllocStruct {
+                        destination: ValueId(0),
+                        struct_id: StructId(0),
+                    }],
+                    terminator: Terminator::Return { value: None },
+                }],
+            }],
+        };
+
+        eliminate_dead_stack_allocs(&mut program)
+            .expect("dead stack allocation elimination should succeed");
+
+        assert!(program.functions[0].blocks[0].instructions.is_empty());
+    }
+
+    #[test]
+    fn preserves_stack_alloc_used_by_store_field() {
+        let mut program = IrProgram {
+            structs: vec![IrStruct {
+                id: StructId(0),
+                name: "Test".to_string(),
+                base: None,
+                fields: vec![IrField {
+                    name: "value".to_string(),
+                    ty: IrType::Int,
+                }],
+            }],
+            functions: vec![IrFunction {
+                id: Some(FunctionId(0)),
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Void,
+                entry: BlockId(0),
+                blocks: vec![BasicBlock {
+                    id: BlockId(0),
+                    instructions: vec![
+                        IrInstruction::StackAllocStruct {
+                            destination: ValueId(0),
+                            struct_id: StructId(0),
+                        },
+                        IrInstruction::ConstInt {
+                            destination: ValueId(1),
+                            value: 42,
+                        },
+                        IrInstruction::StoreField {
+                            receiver: ValueId(0),
+                            field: 0,
+                            value: ValueId(1),
+                        },
+                    ],
+                    terminator: Terminator::Return { value: None },
+                }],
+            }],
+        };
+
+        eliminate_dead_stack_allocs(&mut program)
+            .expect("dead stack allocation elimination should succeed");
+
+        assert!(matches!(
+            program.functions[0].blocks[0].instructions.as_slice(),
+            [
+                IrInstruction::StackAllocStruct {
+                    destination: ValueId(0),
+                    struct_id: StructId(0),
+                },
+                IrInstruction::ConstInt {
+                    destination: ValueId(1),
+                    value: 42,
+                },
+                IrInstruction::StoreField {
+                    receiver: ValueId(0),
+                    field: 0,
+                    value: ValueId(1),
+                }
+            ]
+        ));
+    }
+
+    #[test]
+    fn preserves_stack_alloc_passed_to_call() {
+        let mut program = IrProgram {
+            structs: vec![IrStruct {
+                id: StructId(0),
+                name: "Test".to_string(),
+                base: None,
+                fields: Vec::new(),
+            }],
+            functions: vec![IrFunction {
+                id: Some(FunctionId(0)),
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Void,
+                entry: BlockId(0),
+                blocks: vec![BasicBlock {
+                    id: BlockId(0),
+                    instructions: vec![
+                        IrInstruction::StackAllocStruct {
+                            destination: ValueId(0),
+                            struct_id: StructId(0),
+                        },
+                        IrInstruction::Call {
+                            destination: None,
+                            function: FunctionId(1),
+                            arguments: vec![ValueId(0)],
+                        },
+                    ],
+                    terminator: Terminator::Return { value: None },
+                }],
+            }],
+        };
+
+        eliminate_dead_stack_allocs(&mut program)
+            .expect("dead stack allocation elimination should succeed");
+
+        assert!(matches!(
+            &program.functions[0].blocks[0].instructions[0],
+            IrInstruction::StackAllocStruct {
+                destination: ValueId(0),
+                struct_id: StructId(0),
+            }
+        ));
+    }
+
+    #[test]
+    fn does_not_eliminate_alloc_struct() {
+        let mut program = IrProgram {
+            structs: vec![IrStruct {
+                id: StructId(0),
+                name: "Test".to_string(),
+                base: None,
+                fields: Vec::new(),
+            }],
+            functions: vec![IrFunction {
+                id: Some(FunctionId(0)),
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Void,
+                entry: BlockId(0),
+                blocks: vec![BasicBlock {
+                    id: BlockId(0),
+                    instructions: vec![IrInstruction::AllocStruct {
+                        destination: ValueId(0),
+                        struct_id: StructId(0),
+                    }],
+                    terminator: Terminator::Return { value: None },
+                }],
+            }],
+        };
+
+        eliminate_dead_stack_allocs(&mut program)
+            .expect("dead stack allocation elimination should succeed");
+
+        assert!(matches!(
+            &program.functions[0].blocks[0].instructions[0],
+            IrInstruction::AllocStruct {
+                destination: ValueId(0),
+                struct_id: StructId(0),
+            }
+        ));
+    }
 
     #[test]
     fn eliminates_dead_field_store() {

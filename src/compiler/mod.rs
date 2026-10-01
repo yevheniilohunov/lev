@@ -60,6 +60,7 @@ pub fn compile(source: &str) -> Result<ir::IrProgram, Vec<CompilerError>> {
 
     // Remove unused pure instructions.
     ir::cleanup::eliminate_dead_code(&mut ir)?;
+    ir::cleanup::eliminate_dead_stack_allocs(&mut ir)?;
 
     // Validate the final optimized IR.
     ir::validate(&ir)?;

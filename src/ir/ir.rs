@@ -102,6 +102,11 @@ pub enum IrInstruction {
         struct_id: StructId,
     },
 
+    StackAllocStruct {
+        destination: ValueId,
+        struct_id: StructId,
+    },
+
     StoreField {
         receiver: ValueId,
         field: usize,

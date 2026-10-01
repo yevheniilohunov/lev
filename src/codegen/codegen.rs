@@ -797,6 +797,10 @@ impl<'a> FunctionCodegen<'a> {
                 self.emit_load(*source, "rax")?;
                 self.emit_store(*destination, "rax")?;
             }
+            IrInstruction::StackAllocStruct {
+                destination,
+                struct_id,
+            } => todo!(),
         }
 
         Ok(())
@@ -975,6 +979,7 @@ fn instruction_destination(instruction: &IrInstruction) -> Option<ValueId> {
 
         IrInstruction::StoreField { .. } => None,
         IrInstruction::Copy { destination, .. } => Some(*destination),
+        IrInstruction::StackAllocStruct { destination, .. } => Some(*destination),
     }
 }
 

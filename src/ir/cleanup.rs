@@ -2356,6 +2356,192 @@ fn forward_field_stores_function(function: &mut IrFunction) -> Result<(), Vec<Co
     Ok(())
 }
 
+pub fn eliminate_dead_field_stores(program: &mut IrProgram) -> Result<(), Vec<CompilerError>> {
+    let mut errors = Vec::new();
+
+    for function in &mut program.functions {
+        if let Err(error) = eliminate_dead_field_stores_function(function) {
+            errors.extend(error);
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+fn eliminate_dead_field_stores_function(
+    function: &mut IrFunction,
+) -> Result<(), Vec<CompilerError>> {
+    type FieldKey = (ValueId, usize);
+
+    let mut successors = HashMap::<BlockId, Vec<BlockId>>::new();
+
+    for block in &function.blocks {
+        let targets = match block.terminator {
+            Terminator::Jump(destination) => vec![destination],
+
+            Terminator::Branch {
+                then_block,
+                else_block,
+                ..
+            } => {
+                if then_block == else_block {
+                    vec![then_block]
+                } else {
+                    vec![then_block, else_block]
+                }
+            }
+
+            Terminator::Return { .. } | Terminator::Unreachable => Vec::new(),
+        };
+
+        successors.insert(block.id, targets);
+    }
+
+    let mut live_in = HashMap::<BlockId, HashSet<FieldKey>>::new();
+    let mut live_out = HashMap::<BlockId, HashSet<FieldKey>>::new();
+
+    for block in &function.blocks {
+        live_in.insert(block.id, HashSet::new());
+        live_out.insert(block.id, HashSet::new());
+    }
+
+    // Backward field liveness.
+    //
+    // A call is treated conservatively: it may inspect any field of any
+    // object, so every StoreField before a call must be preserved.
+    let mut call_live_in = HashMap::<BlockId, bool>::new();
+    let mut call_live_out = HashMap::<BlockId, bool>::new();
+
+    for block in &function.blocks {
+        call_live_in.insert(block.id, false);
+        call_live_out.insert(block.id, false);
+    }
+
+    loop {
+        let mut changed = false;
+
+        for block in function.blocks.iter().rev() {
+            let mut new_live_out = HashSet::new();
+            let mut new_call_live_out = false;
+
+            if let Some(block_successors) = successors.get(&block.id) {
+                for successor in block_successors {
+                    if let Some(successor_live_in) = live_in.get(successor) {
+                        new_live_out.extend(successor_live_in);
+                    }
+
+                    if call_live_in.get(successor).copied().unwrap_or(false) {
+                        new_call_live_out = true;
+                    }
+                }
+            }
+
+            let mut live = new_live_out.clone();
+            let mut call_live = new_call_live_out;
+
+            for instruction in block.instructions.iter().rev() {
+                match instruction {
+                    IrInstruction::LoadField {
+                        receiver, field, ..
+                    } => {
+                        live.insert((*receiver, *field));
+                    }
+
+                    IrInstruction::StoreField {
+                        receiver, field, ..
+                    } => {
+                        let key = (*receiver, *field);
+
+                        if !call_live {
+                            live.remove(&key);
+                        }
+                    }
+
+                    IrInstruction::Call { .. } => {
+                        call_live = true;
+                    }
+
+                    _ => {}
+                }
+            }
+
+            if live_in.get(&block.id) != Some(&live) {
+                live_in.insert(block.id, live);
+                changed = true;
+            }
+
+            if live_out.get(&block.id) != Some(&new_live_out) {
+                live_out.insert(block.id, new_live_out);
+                changed = true;
+            }
+
+            if call_live_in.get(&block.id) != Some(&call_live) {
+                call_live_in.insert(block.id, call_live);
+                changed = true;
+            }
+
+            if call_live_out.get(&block.id) != Some(&new_call_live_out) {
+                call_live_out.insert(block.id, new_call_live_out);
+                changed = true;
+            }
+        }
+
+        if !changed {
+            break;
+        }
+    }
+
+    // Remove stores whose field value is never observed.
+    for block in &mut function.blocks {
+        let mut live = live_out.get(&block.id).cloned().unwrap_or_default();
+        let mut call_live = call_live_out.get(&block.id).copied().unwrap_or(false);
+
+        let mut remove = HashSet::<usize>::new();
+
+        for (index, instruction) in block.instructions.iter().enumerate().rev() {
+            match instruction {
+                IrInstruction::LoadField {
+                    receiver, field, ..
+                } => {
+                    live.insert((*receiver, *field));
+                }
+
+                IrInstruction::StoreField {
+                    receiver, field, ..
+                } => {
+                    let key = (*receiver, *field);
+
+                    if !call_live && !live.contains(&key) {
+                        remove.insert(index);
+                    } else if !call_live {
+                        live.remove(&key);
+                    }
+                }
+
+                IrInstruction::Call { .. } => {
+                    call_live = true;
+                }
+
+                _ => {}
+            }
+        }
+
+        let mut index = 0;
+
+        block.instructions.retain(|_| {
+            let keep = !remove.contains(&index);
+            index += 1;
+            keep
+        });
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2365,6 +2551,185 @@ mod tests {
     };
     use crate::ir::{BlockId, IrLocal};
     use crate::semantic::symbols::{FunctionId, LocalId, StructId};
+
+    #[test]
+    fn eliminates_dead_field_store() {
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![IrFunction {
+                id: None,
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Int,
+                entry: BlockId(0),
+                blocks: vec![BasicBlock {
+                    id: BlockId(0),
+                    instructions: vec![
+                        IrInstruction::AllocStruct {
+                            destination: ValueId(0),
+                            struct_id: StructId(0),
+                        },
+                        IrInstruction::ConstInt {
+                            destination: ValueId(1),
+                            value: 42,
+                        },
+                        IrInstruction::StoreField {
+                            receiver: ValueId(0),
+                            field: 0,
+                            value: ValueId(1),
+                        },
+                    ],
+                    terminator: Terminator::Return {
+                        value: Some(ValueId(1)),
+                    },
+                }],
+            }],
+        };
+
+        eliminate_dead_field_stores(&mut program).expect("optimization should succeed");
+
+        let instructions = &program.functions[0].blocks[0].instructions;
+
+        assert!(!instructions
+            .iter()
+            .any(|instruction| { matches!(instruction, IrInstruction::StoreField { .. }) }));
+    }
+
+    #[test]
+    fn eliminates_only_unobserved_field_store() {
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![IrFunction {
+                id: None,
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Int,
+                entry: BlockId(0),
+                blocks: vec![BasicBlock {
+                    id: BlockId(0),
+                    instructions: vec![
+                        IrInstruction::AllocStruct {
+                            destination: ValueId(0),
+                            struct_id: StructId(0),
+                        },
+                        IrInstruction::ConstInt {
+                            destination: ValueId(1),
+                            value: 10,
+                        },
+                        IrInstruction::ConstInt {
+                            destination: ValueId(2),
+                            value: 20,
+                        },
+                        IrInstruction::StoreField {
+                            receiver: ValueId(0),
+                            field: 0,
+                            value: ValueId(1),
+                        },
+                        IrInstruction::StoreField {
+                            receiver: ValueId(0),
+                            field: 1,
+                            value: ValueId(2),
+                        },
+                        IrInstruction::LoadField {
+                            destination: ValueId(3),
+                            receiver: ValueId(0),
+                            field: 1,
+                        },
+                    ],
+                    terminator: Terminator::Return {
+                        value: Some(ValueId(3)),
+                    },
+                }],
+            }],
+        };
+
+        eliminate_dead_field_stores(&mut program).expect("optimization should succeed");
+
+        let instructions = &program.functions[0].blocks[0].instructions;
+
+        assert!(!instructions.iter().any(|instruction| {
+            matches!(
+                instruction,
+                IrInstruction::StoreField {
+                    receiver: ValueId(0),
+                    field: 0,
+                    ..
+                }
+            )
+        }));
+
+        assert!(instructions.iter().any(|instruction| {
+            matches!(
+                instruction,
+                IrInstruction::StoreField {
+                    receiver: ValueId(0),
+                    field: 1,
+                    value: ValueId(2),
+                }
+            )
+        }));
+    }
+
+    #[test]
+    fn preserves_field_store_before_call() {
+        let mut program = IrProgram {
+            structs: Vec::new(),
+            functions: vec![IrFunction {
+                id: None,
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Int,
+                entry: BlockId(0),
+                blocks: vec![BasicBlock {
+                    id: BlockId(0),
+                    instructions: vec![
+                        IrInstruction::AllocStruct {
+                            destination: ValueId(0),
+                            struct_id: StructId(0),
+                        },
+                        IrInstruction::ConstInt {
+                            destination: ValueId(1),
+                            value: 42,
+                        },
+                        IrInstruction::StoreField {
+                            receiver: ValueId(0),
+                            field: 0,
+                            value: ValueId(1),
+                        },
+                        IrInstruction::Call {
+                            destination: None,
+                            function: FunctionId(0),
+                            arguments: vec![ValueId(0)],
+                        },
+                    ],
+                    terminator: Terminator::Return {
+                        value: Some(ValueId(1)),
+                    },
+                }],
+            }],
+        };
+
+        eliminate_dead_field_stores(&mut program).expect("optimization should succeed");
+
+        let instructions = &program.functions[0].blocks[0].instructions;
+
+        assert!(instructions.iter().any(|instruction| {
+            matches!(
+                instruction,
+                IrInstruction::StoreField {
+                    receiver: ValueId(0),
+                    field: 0,
+                    value: ValueId(1),
+                }
+            )
+        }));
+    }
 
     #[test]
     fn forwards_field_store_into_load() {

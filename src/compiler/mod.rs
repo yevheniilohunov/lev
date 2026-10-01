@@ -49,6 +49,7 @@ pub fn compile(source: &str) -> Result<ir::IrProgram, Vec<CompilerError>> {
     ir::cleanup::forward_field_stores(&mut ir)?;
     ir::cleanup::eliminate_redundant_field_loads(&mut ir)?;
     ir::cleanup::eliminate_dead_stores(&mut ir)?;
+    ir::cleanup::eliminate_dead_field_stores(&mut ir)?;
 
     // Global value numbering / common-subexpression elimination.
     ir::cleanup::gvn_cse(&mut ir)?;

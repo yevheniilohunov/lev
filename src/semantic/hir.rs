@@ -123,6 +123,12 @@ impl fmt::Display for HirExpr {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HirAllocationKind {
+    Heap,
+    Stack,
+}
+
 #[derive(Debug)]
 pub enum HirExprKind {
     Integer(i64),
@@ -153,6 +159,7 @@ pub enum HirExprKind {
         struct_id: StructId,
         constructor: Option<ConstructorId>,
         arguments: Vec<HirExpr>,
+        allocation: HirAllocationKind,
     },
 
     Field {

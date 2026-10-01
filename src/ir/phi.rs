@@ -57,10 +57,7 @@ fn instruction_destination(instruction: &IrInstruction) -> Option<ValueId> {
         IrInstruction::Call { destination, .. } => *destination,
 
         IrInstruction::StoreLocal { .. } | IrInstruction::StoreField { .. } => None,
-        IrInstruction::StackAllocStruct {
-            destination,
-            struct_id,
-        } => todo!(),
+        IrInstruction::StackAllocStruct { destination, .. } => Some(*destination),
     }
 }
 

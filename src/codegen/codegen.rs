@@ -186,6 +186,11 @@ impl<'a> FunctionCodegen<'a> {
                         struct_id,
                     } => (*destination, *struct_id),
 
+                    IrInstruction::StackAllocStruct {
+                        destination,
+                        struct_id,
+                    } => (*destination, *struct_id),
+
                     IrInstruction::StructCopy {
                         destination,
                         struct_id,
@@ -448,8 +453,10 @@ impl<'a> FunctionCodegen<'a> {
             return 0;
         }
 
-        // Keep the stack 16-byte aligned.
-        ((required + 15) / 16) * 16
+        // `push rbp` leaves rsp 8 bytes off a 16-byte boundary.
+        // Make the frame size 8 mod 16 so rsp is 16-byte aligned
+        // before any outgoing call.
+        ((required + 23) / 16) * 16 + 8
     }
 
     fn emit_prologue(&mut self) -> Result<(), Vec<CompilerError>> {
@@ -800,7 +807,31 @@ impl<'a> FunctionCodegen<'a> {
             IrInstruction::StackAllocStruct {
                 destination,
                 struct_id,
-            } => todo!(),
+            } => {
+                let offset = self.struct_storage.get(destination).ok_or_else(|| {
+                    vec![CompilerError::internal(format!(
+                        "no stack storage allocated for stack struct value {:?}",
+                        destination
+                    ))]
+                })?;
+
+                let _structure = self
+                    .program
+                    .structs
+                    .iter()
+                    .find(|structure| structure.id == *struct_id)
+                    .ok_or_else(|| {
+                        vec![CompilerError::internal(format!(
+                            "unknown struct id {:?}",
+                            struct_id
+                        ))]
+                    })?;
+
+                writeln!(self.output, "    lea rax, [rbp-{}]", offset)
+                    .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+
+                self.emit_store(*destination, "rax")?;
+            }
         }
 
         Ok(())

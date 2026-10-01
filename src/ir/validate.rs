@@ -250,7 +250,7 @@ impl<'a> Validator<'a> {
             }
 
             IrInstruction::StoreLocal { .. } | IrInstruction::StoreField { .. } => None,
-            IrInstruction::StackAllocStruct { destination, struct_id } => todo!(),
+            IrInstruction::StackAllocStruct { destination, struct_id } => Some(IrType::Struct(*struct_id)),
         }
     }
 
@@ -537,7 +537,7 @@ impl<'a> Validator<'a> {
                     }
                 }
             }
-            IrInstruction::StackAllocStruct { destination, struct_id } => todo!(),
+            IrInstruction::StackAllocStruct { destination, struct_id } => {}
         }
     }
 

@@ -677,13 +677,22 @@ impl<'a> FunctionBuilder<'a> {
                 struct_id,
                 constructor,
                 arguments,
+                allocation,
             } => {
                 let destination = self.new_value();
 
-                self.emit(IrInstruction::AllocStruct {
-                    destination,
-                    struct_id: *struct_id,
-                });
+                let instruction = match allocation {
+                    HirAllocationKind::Heap => IrInstruction::AllocStruct {
+                        destination,
+                        struct_id: *struct_id,
+                    },
+                    HirAllocationKind::Stack => IrInstruction::StackAllocStruct {
+                        destination,
+                        struct_id: *struct_id,
+                    },
+                };
+
+                self.emit(instruction);
 
                 if let Some(constructor_id) = constructor {
                     let function = match self.constructor_function_id(*constructor_id) {

@@ -468,7 +468,12 @@ fn rename_block(
             IrInstruction::StackAllocStruct {
                 destination,
                 struct_id,
-            } => todo!(),
+            } => {
+                new_instructions.push(IrInstruction::StackAllocStruct {
+                    destination,
+                    struct_id,
+                });
+            }
         }
     }
 
@@ -696,9 +701,6 @@ fn instruction_destination(instruction: &IrInstruction) -> Option<ValueId> {
 
         IrInstruction::StoreLocal { .. } => None,
         IrInstruction::StoreField { .. } => None,
-        IrInstruction::StackAllocStruct {
-            destination,
-            struct_id,
-        } => todo!(),
+        IrInstruction::StackAllocStruct { destination, .. } => Some(*destination),
     }
 }

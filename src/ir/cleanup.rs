@@ -2629,6 +2629,109 @@ pub fn eliminate_dead_stack_allocs(program: &mut IrProgram) -> Result<(), Vec<Co
     Ok(())
 }
 
+pub fn promote_non_escaping_allocs(program: &mut IrProgram) -> Result<(), Vec<CompilerError>> {
+    for function in &mut program.functions {
+        // Values that may escape this function.
+        let mut escaping = HashSet::<ValueId>::new();
+
+        // Copies and Phi nodes can preserve object identity.
+        // Treat connected values as aliases.
+        let mut aliases = HashMap::<ValueId, HashSet<ValueId>>::new();
+
+        for block in &function.blocks {
+            for instruction in &block.instructions {
+                match instruction {
+                    IrInstruction::Copy {
+                        destination,
+                        source,
+                    } => {
+                        aliases.entry(*destination).or_default().insert(*source);
+                        aliases.entry(*source).or_default().insert(*destination);
+                    }
+
+                    IrInstruction::Phi {
+                        destination,
+                        sources,
+                        ..
+                    } => {
+                        for (_, source) in sources {
+                            aliases.entry(*destination).or_default().insert(*source);
+                            aliases.entry(*source).or_default().insert(*destination);
+                        }
+                    }
+
+                    // These uses may make an object observable outside
+                    // the current function.
+                    IrInstruction::StoreLocal { value, .. }
+                    | IrInstruction::StoreField { value, .. } => {
+                        escaping.insert(*value);
+                    }
+
+                    IrInstruction::Call { arguments, .. } => {
+                        escaping.extend(arguments.iter().copied());
+                    }
+
+                    IrInstruction::Binary { left, right, .. } => {
+                        // Struct values are not expected here, but keep
+                        // unknown value uses conservative.
+                        escaping.insert(*left);
+                        escaping.insert(*right);
+                    }
+
+                    _ => {}
+                }
+            }
+
+            match &block.terminator {
+                Terminator::Return { value: Some(value) } => {
+                    escaping.insert(*value);
+                }
+
+                Terminator::Branch { condition, .. } => {
+                    escaping.insert(*condition);
+                }
+
+                Terminator::Jump(_)
+                | Terminator::Return { value: None }
+                | Terminator::Unreachable => {}
+            }
+        }
+
+        // If one alias escapes, every value aliasing that object escapes.
+        let mut worklist: Vec<ValueId> = escaping.iter().copied().collect();
+
+        while let Some(value) = worklist.pop() {
+            if let Some(value_aliases) = aliases.get(&value) {
+                for alias in value_aliases {
+                    if escaping.insert(*alias) {
+                        worklist.push(*alias);
+                    }
+                }
+            }
+        }
+
+        // Stack-promote only allocations proven not to escape.
+        for block in &mut function.blocks {
+            for instruction in &mut block.instructions {
+                if let IrInstruction::AllocStruct {
+                    destination,
+                    struct_id,
+                } = instruction
+                {
+                    if !escaping.contains(destination) {
+                        *instruction = IrInstruction::StackAllocStruct {
+                            destination: *destination,
+                            struct_id: *struct_id,
+                        };
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2638,6 +2741,190 @@ mod tests {
     };
     use crate::ir::{BlockId, IrField, IrLocal, IrStruct};
     use crate::semantic::symbols::{FunctionId, LocalId, StructId};
+
+    fn allocation_program(
+        instructions: Vec<IrInstruction>,
+        return_value: Option<ValueId>,
+    ) -> IrProgram {
+        IrProgram {
+            structs: Vec::new(),
+            functions: vec![IrFunction {
+                id: None,
+                name: "test".to_string(),
+                owner: None,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                return_type: IrType::Int,
+                entry: BlockId(0),
+                blocks: vec![BasicBlock {
+                    id: BlockId(0),
+                    instructions,
+                    terminator: Terminator::Return {
+                        value: return_value,
+                    },
+                }],
+            }],
+        }
+    }
+
+    #[test]
+    fn promotes_non_escaping_allocation() {
+        let mut program = allocation_program(
+            vec![
+                IrInstruction::AllocStruct {
+                    destination: ValueId(0),
+                    struct_id: StructId(0),
+                },
+                IrInstruction::ConstInt {
+                    destination: ValueId(1),
+                    value: 42,
+                },
+                IrInstruction::StoreField {
+                    receiver: ValueId(0),
+                    field: 0,
+                    value: ValueId(1),
+                },
+            ],
+            Some(ValueId(1)),
+        );
+
+        promote_non_escaping_allocs(&mut program).expect("optimization should succeed");
+
+        assert!(matches!(
+            &program.functions[0].blocks[0].instructions[0],
+            IrInstruction::StackAllocStruct {
+                destination: ValueId(0),
+                struct_id: StructId(0),
+            }
+        ));
+    }
+
+    #[test]
+    fn preserves_allocation_returned_from_function() {
+        let mut program = allocation_program(
+            vec![IrInstruction::AllocStruct {
+                destination: ValueId(0),
+                struct_id: StructId(0),
+            }],
+            Some(ValueId(0)),
+        );
+
+        promote_non_escaping_allocs(&mut program).expect("optimization should succeed");
+
+        assert!(matches!(
+            &program.functions[0].blocks[0].instructions[0],
+            IrInstruction::AllocStruct {
+                destination: ValueId(0),
+                struct_id: StructId(0),
+            }
+        ));
+    }
+
+    #[test]
+    fn preserves_allocation_passed_to_call() {
+        let mut program = allocation_program(
+            vec![
+                IrInstruction::AllocStruct {
+                    destination: ValueId(0),
+                    struct_id: StructId(0),
+                },
+                IrInstruction::Call {
+                    destination: None,
+                    function: FunctionId(0),
+                    arguments: vec![ValueId(0)],
+                },
+            ],
+            None,
+        );
+
+        promote_non_escaping_allocs(&mut program).expect("optimization should succeed");
+
+        assert!(matches!(
+            &program.functions[0].blocks[0].instructions[0],
+            IrInstruction::AllocStruct { .. }
+        ));
+    }
+
+    #[test]
+    fn preserves_allocation_when_copy_escapes() {
+        let mut program = allocation_program(
+            vec![
+                IrInstruction::AllocStruct {
+                    destination: ValueId(0),
+                    struct_id: StructId(0),
+                },
+                IrInstruction::Copy {
+                    destination: ValueId(1),
+                    source: ValueId(0),
+                },
+            ],
+            Some(ValueId(1)),
+        );
+
+        promote_non_escaping_allocs(&mut program).expect("optimization should succeed");
+
+        assert!(matches!(
+            &program.functions[0].blocks[0].instructions[0],
+            IrInstruction::AllocStruct { .. }
+        ));
+    }
+
+    #[test]
+    fn promotes_allocation_used_as_struct_copy_source() {
+        let mut program = allocation_program(
+            vec![
+                IrInstruction::AllocStruct {
+                    destination: ValueId(0),
+                    struct_id: StructId(0),
+                },
+                IrInstruction::StructCopy {
+                    destination: ValueId(1),
+                    source: ValueId(0),
+                    struct_id: StructId(0),
+                },
+            ],
+            Some(ValueId(1)),
+        );
+
+        promote_non_escaping_allocs(&mut program).expect("optimization should succeed");
+
+        assert!(matches!(
+            &program.functions[0].blocks[0].instructions[0],
+            IrInstruction::StackAllocStruct { .. }
+        ));
+    }
+
+    #[test]
+    fn preserves_allocation_stored_as_field_value() {
+        let mut program = allocation_program(
+            vec![
+                IrInstruction::AllocStruct {
+                    destination: ValueId(0),
+                    struct_id: StructId(0),
+                },
+                IrInstruction::AllocStruct {
+                    destination: ValueId(1),
+                    struct_id: StructId(0),
+                },
+                IrInstruction::StoreField {
+                    receiver: ValueId(1),
+                    field: 0,
+                    value: ValueId(0),
+                },
+            ],
+            Some(ValueId(1)),
+        );
+
+        promote_non_escaping_allocs(&mut program).expect("optimization should succeed");
+
+        assert!(matches!(
+            &program.functions[0].blocks[0].instructions[0],
+            IrInstruction::AllocStruct {
+                destination: ValueId(0),
+                ..
+            }
+        ));
+    }
 
     #[test]
     fn eliminates_unused_stack_alloc() {

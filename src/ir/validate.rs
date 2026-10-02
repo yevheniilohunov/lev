@@ -821,22 +821,42 @@ impl<'a> Validator<'a> {
         // may need definitions that are encountered later in the block
         // traversal. Repeat until no new definitions can be inferred.
 
-        for block in &function.blocks {
-            if !dominance.reachable.contains(&block.id) {
-                continue;
-            }
+        let mut changed = true;
 
-            for instruction in &block.instructions {
-                let Some(destination) = instruction_destination(instruction) else {
+        while changed {
+            changed = false;
+
+            for block in &function.blocks {
+                if !dominance.reachable.contains(&block.id) {
                     continue;
-                };
+                }
 
-                definitions.entry(destination).or_insert(ValueDefinition {
-                    block: block.id,
-                    ty: IrType::Int, // temporary placeholder
-                });
+                for instruction in &block.instructions {
+                    let Some(destination) = instruction_destination(instruction) else {
+                        continue;
+                    };
+
+                    if definitions.contains_key(&destination) {
+                        continue;
+                    }
+
+                    let Some(ty) = self.pe(function, instruction, &definitions) else {
+                        continue;
+                    };
+
+                    definitions.insert(
+                        destination,
+                        ValueDefinition {
+                            block: block.id,
+                            ty,
+                        },
+                    );
+
+                    changed = true;
+                }
             }
         }
+        
         if require_ssa {
             // Check for duplicate SSA value definitions separately.
             //

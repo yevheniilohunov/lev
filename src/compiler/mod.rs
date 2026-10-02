@@ -16,17 +16,24 @@ pub fn compile(source: &str) -> Result<ir::IrProgram, Vec<CompilerError>> {
 
     let mut ir = ir::lower::lower_to_ir(hir)?;
 
+    // eprintln!("lower_to_ir: {:?}", ir);
+
     // Validate the CFG before SSA construction.
     ir::validate(&ir)?;
+    // eprintln!("Validate the CFG before SSA construction: {:?}", ir);
 
     // Convert local-variable based IR into SSA.
     ir::construct_ssa(&mut ir)?;
+
+    // eprintln!("construct_ssa: {:?}", ir);
 
     // Validate the resulting SSA IR.
     ir::validate_ssa(&ir)?;
 
     // Lower Phi nodes back into ordinary copies.
     ir::phi::lower_phis(&mut ir)?;
+
+    // eprintln!("lower_phis: {:?}", ir);
 
     // Simplify branches and CFG structure.
     ir::cleanup::simplify_constant_branches(&mut ir)?;
@@ -339,12 +346,10 @@ mod tests {
             matches!(instruction, IrInstruction::ConstInt { value: 20, .. })
         }));
 
-        assert!(
-            function
-                .blocks
-                .iter()
-                .all(|block| { !matches!(block.terminator, crate::ir::Terminator::Branch { .. }) })
-        );
+        assert!(function
+            .blocks
+            .iter()
+            .all(|block| { !matches!(block.terminator, crate::ir::Terminator::Branch { .. }) }));
     }
 
     #[test]
@@ -376,12 +381,10 @@ mod tests {
             matches!(instruction, IrInstruction::ConstInt { value: 10, .. })
         }));
 
-        assert!(
-            function
-                .blocks
-                .iter()
-                .all(|block| { !matches!(block.terminator, crate::ir::Terminator::Branch { .. }) })
-        );
+        assert!(function
+            .blocks
+            .iter()
+            .all(|block| { !matches!(block.terminator, crate::ir::Terminator::Branch { .. }) }));
     }
 
     #[test]
@@ -407,12 +410,10 @@ mod tests {
             "constant condition should not leave redundant CFG blocks"
         );
 
-        assert!(
-            function
-                .blocks
-                .iter()
-                .all(|block| { !matches!(block.terminator, crate::ir::Terminator::Branch { .. }) })
-        );
+        assert!(function
+            .blocks
+            .iter()
+            .all(|block| { !matches!(block.terminator, crate::ir::Terminator::Branch { .. }) }));
     }
 
     #[test]

@@ -2496,29 +2496,33 @@ fn eliminate_dead_field_stores_function(
     let mut live_in = HashMap::<BlockId, HashSet<FieldKey>>::new();
     let mut live_out = HashMap::<BlockId, HashSet<FieldKey>>::new();
 
-    for block in &function.blocks {
-        live_in.insert(block.id, HashSet::new());
-        live_out.insert(block.id, HashSet::new());
-    }
-
-    // Backward field liveness.
-    //
-    // A call is treated conservatively: it may inspect any field of any
-    // object, so every StoreField before a call must be preserved.
     let mut call_live_in = HashMap::<BlockId, bool>::new();
     let mut call_live_out = HashMap::<BlockId, bool>::new();
 
+    // Values whose fields may be observed by the caller because the
+    // object escapes through a Return.
+    let mut escaped_in = HashMap::<BlockId, HashSet<ValueId>>::new();
+    let mut escaped_out = HashMap::<BlockId, HashSet<ValueId>>::new();
+
     for block in &function.blocks {
+        live_in.insert(block.id, HashSet::new());
+        live_out.insert(block.id, HashSet::new());
+
         call_live_in.insert(block.id, false);
         call_live_out.insert(block.id, false);
+
+        escaped_in.insert(block.id, HashSet::new());
+        escaped_out.insert(block.id, HashSet::new());
     }
 
+    // Backward field liveness and escape analysis.
     loop {
         let mut changed = false;
 
         for block in function.blocks.iter().rev() {
             let mut new_live_out = HashSet::new();
             let mut new_call_live_out = false;
+            let mut new_escaped_out = HashSet::new();
 
             if let Some(block_successors) = successors.get(&block.id) {
                 for successor in block_successors {
@@ -2529,11 +2533,22 @@ fn eliminate_dead_field_stores_function(
                     if call_live_in.get(successor).copied().unwrap_or(false) {
                         new_call_live_out = true;
                     }
+
+                    if let Some(successor_escaped_in) = escaped_in.get(successor) {
+                        new_escaped_out.extend(successor_escaped_in);
+                    }
                 }
             }
 
             let mut live = new_live_out.clone();
             let mut call_live = new_call_live_out;
+            let mut escaped = new_escaped_out.clone();
+
+            // A returned object escapes the function. Its fields may be
+            // observed by the caller, so stores to it must be preserved.
+            if let Terminator::Return { value: Some(value) } = block.terminator {
+                escaped.insert(value);
+            }
 
             for instruction in block.instructions.iter().rev() {
                 match instruction {
@@ -2548,8 +2563,21 @@ fn eliminate_dead_field_stores_function(
                     } => {
                         let key = (*receiver, *field);
 
-                        if !call_live {
+                        if escaped.contains(receiver) {
+                            live.insert(key);
+                        } else if !call_live {
                             live.remove(&key);
+                        }
+                    }
+
+                    // Preserve the fact that the destination aliases the
+                    // source when the destination escapes.
+                    IrInstruction::Copy {
+                        destination,
+                        source,
+                    } => {
+                        if escaped.remove(destination) {
+                            escaped.insert(*source);
                         }
                     }
 
@@ -2580,6 +2608,16 @@ fn eliminate_dead_field_stores_function(
                 call_live_out.insert(block.id, new_call_live_out);
                 changed = true;
             }
+
+            if escaped_in.get(&block.id) != Some(&escaped) {
+                escaped_in.insert(block.id, escaped);
+                changed = true;
+            }
+
+            if escaped_out.get(&block.id) != Some(&new_escaped_out) {
+                escaped_out.insert(block.id, new_escaped_out);
+                changed = true;
+            }
         }
 
         if !changed {
@@ -2591,6 +2629,11 @@ fn eliminate_dead_field_stores_function(
     for block in &mut function.blocks {
         let mut live = live_out.get(&block.id).cloned().unwrap_or_default();
         let mut call_live = call_live_out.get(&block.id).copied().unwrap_or(false);
+        let mut escaped = escaped_out.get(&block.id).cloned().unwrap_or_default();
+
+        if let Terminator::Return { value: Some(value) } = block.terminator {
+            escaped.insert(value);
+        }
 
         let mut remove = HashSet::<usize>::new();
 
@@ -2607,10 +2650,21 @@ fn eliminate_dead_field_stores_function(
                 } => {
                     let key = (*receiver, *field);
 
-                    if !call_live && !live.contains(&key) {
+                    if escaped.contains(receiver) {
+                        live.insert(key);
+                    } else if !call_live && !live.contains(&key) {
                         remove.insert(index);
                     } else if !call_live {
                         live.remove(&key);
+                    }
+                }
+
+                IrInstruction::Copy {
+                    destination,
+                    source,
+                } => {
+                    if escaped.remove(destination) {
+                        escaped.insert(*source);
                     }
                 }
 
@@ -3241,11 +3295,9 @@ mod tests {
 
         let instructions = &program.functions[0].blocks[0].instructions;
 
-        assert!(
-            !instructions
-                .iter()
-                .any(|instruction| { matches!(instruction, IrInstruction::StoreField { .. }) })
-        );
+        assert!(!instructions
+            .iter()
+            .any(|instruction| { matches!(instruction, IrInstruction::StoreField { .. }) }));
     }
 
     #[test]
@@ -6901,11 +6953,9 @@ mod tests {
 
         let instructions = &program.functions[0].blocks[0].instructions;
 
-        assert!(
-            !instructions
-                .iter()
-                .any(|instruction| { matches!(instruction, IrInstruction::LoadLocal { .. }) })
-        );
+        assert!(!instructions
+            .iter()
+            .any(|instruction| { matches!(instruction, IrInstruction::LoadLocal { .. }) }));
     }
 
     #[test]

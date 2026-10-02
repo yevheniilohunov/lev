@@ -3241,9 +3241,11 @@ mod tests {
 
         let instructions = &program.functions[0].blocks[0].instructions;
 
-        assert!(!instructions
-            .iter()
-            .any(|instruction| { matches!(instruction, IrInstruction::StoreField { .. }) }));
+        assert!(
+            !instructions
+                .iter()
+                .any(|instruction| { matches!(instruction, IrInstruction::StoreField { .. }) })
+        );
     }
 
     #[test]
@@ -6899,9 +6901,11 @@ mod tests {
 
         let instructions = &program.functions[0].blocks[0].instructions;
 
-        assert!(!instructions
-            .iter()
-            .any(|instruction| { matches!(instruction, IrInstruction::LoadLocal { .. }) }));
+        assert!(
+            !instructions
+                .iter()
+                .any(|instruction| { matches!(instruction, IrInstruction::LoadLocal { .. }) })
+        );
     }
 
     #[test]

@@ -339,10 +339,12 @@ mod tests {
             matches!(instruction, IrInstruction::ConstInt { value: 20, .. })
         }));
 
-        assert!(function
-            .blocks
-            .iter()
-            .all(|block| { !matches!(block.terminator, crate::ir::Terminator::Branch { .. }) }));
+        assert!(
+            function
+                .blocks
+                .iter()
+                .all(|block| { !matches!(block.terminator, crate::ir::Terminator::Branch { .. }) })
+        );
     }
 
     #[test]
@@ -374,10 +376,12 @@ mod tests {
             matches!(instruction, IrInstruction::ConstInt { value: 10, .. })
         }));
 
-        assert!(function
-            .blocks
-            .iter()
-            .all(|block| { !matches!(block.terminator, crate::ir::Terminator::Branch { .. }) }));
+        assert!(
+            function
+                .blocks
+                .iter()
+                .all(|block| { !matches!(block.terminator, crate::ir::Terminator::Branch { .. }) })
+        );
     }
 
     #[test]
@@ -403,10 +407,12 @@ mod tests {
             "constant condition should not leave redundant CFG blocks"
         );
 
-        assert!(function
-            .blocks
-            .iter()
-            .all(|block| { !matches!(block.terminator, crate::ir::Terminator::Branch { .. }) }));
+        assert!(
+            function
+                .blocks
+                .iter()
+                .all(|block| { !matches!(block.terminator, crate::ir::Terminator::Branch { .. }) })
+        );
     }
 
     #[test]

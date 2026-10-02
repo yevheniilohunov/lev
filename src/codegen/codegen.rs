@@ -833,10 +833,10 @@ impl<'a> FunctionCodegen<'a> {
 
                 if arguments.len() > max_arguments {
                     return Err(vec![CompilerError::internal(format!(
-                            "function call has {} arguments, but only {} integer arguments are currently supported",
-                            arguments.len(),
-                            max_arguments
-                     ))]);
+                        "function call has {} arguments, but only {} integer arguments are currently supported",
+                        arguments.len(),
+                        max_arguments
+                    ))]);
                 }
 
                 let function_name = self.function_names.get(&Some(*function)).ok_or_else(|| {

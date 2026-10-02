@@ -785,7 +785,7 @@ impl<'a> Analyzer<'a> {
 
                             None => {
                                 return Err(vec![
-                                    self.error_at(format!("unknown target '{}'", name), *span)
+                                    self.error_at(format!("unknown target '{}'", name), *span),
                                 ]);
                             }
                         };
@@ -802,7 +802,7 @@ impl<'a> Analyzer<'a> {
 
                             None => {
                                 return Err(vec![
-                                    self.error_at("internal error: missing type for local", *span)
+                                    self.error_at("internal error: missing type for local", *span),
                                 ]);
                             }
                         };
@@ -890,7 +890,7 @@ impl<'a> Analyzer<'a> {
 
                     None => {
                         return Err(vec![
-                            self.error_at("cannot determine type of variable declaration", *span)
+                            self.error_at("cannot determine type of variable declaration", *span),
                         ]);
                     }
                 };
@@ -1019,7 +1019,7 @@ impl<'a> Analyzer<'a> {
             Stmt::Break { span } => {
                 if loop_depth == 0 {
                     return Err(vec![
-                        self.error_at("'break' is only valid inside a loop", *span)
+                        self.error_at("'break' is only valid inside a loop", *span),
                     ]);
                 }
 
@@ -1029,7 +1029,7 @@ impl<'a> Analyzer<'a> {
             Stmt::Continue { span } => {
                 if loop_depth == 0 {
                     return Err(vec![
-                        self.error_at("'continue' is only valid inside a loop", *span)
+                        self.error_at("'continue' is only valid inside a loop", *span),
                     ]);
                 }
 
@@ -1047,7 +1047,7 @@ impl<'a> Analyzer<'a> {
 
                     None => {
                         return Err(vec![
-                            self.error_at("cannot determine type of variable declaration", *span)
+                            self.error_at("cannot determine type of variable declaration", *span),
                         ]);
                     }
                 };

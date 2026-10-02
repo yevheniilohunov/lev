@@ -865,13 +865,9 @@ fn copy_propagate_function(function: &mut IrFunction) -> Result<(), Vec<Compiler
     let mut in_facts = HashMap::<BlockId, HashMap<ValueId, ValueId>>::new();
     let mut out_facts = HashMap::<BlockId, HashMap<ValueId, ValueId>>::new();
 
-    // The entry block starts with no incoming copy facts.
+    // Entry has no incoming copy facts.
     in_facts.insert(function.entry, HashMap::new());
 
-    // Compute a conservative fixed point.
-    //
-    // For blocks with multiple predecessors, a copy is propagated only
-    // when every predecessor agrees on the same source.
     loop {
         let mut changed = false;
 
@@ -912,7 +908,7 @@ fn copy_propagate_function(function: &mut IrFunction) -> Result<(), Vec<Compiler
         }
     }
 
-    // Rewrite using the fixed-point facts.
+    // Rewrite all uses using the copy facts available at each point.
     for block in &mut function.blocks {
         let mut facts = in_facts.get(&block.id).cloned().unwrap_or_default();
 
@@ -930,10 +926,103 @@ fn copy_propagate_function(function: &mut IrFunction) -> Result<(), Vec<Compiler
         }
 
         rewrite_terminator_values(&mut block.terminator, &facts);
+    }
 
-        block
-            .instructions
-            .retain(|instruction| !matches!(instruction, IrInstruction::Copy { .. }));
+    // Determine which values are still used after propagation.
+    //
+    // This is deliberately done after rewriting. For example:
+    //
+    //     %1 = Copy %0
+    //     %3 = Binary %1, %2
+    //
+    // becomes:
+    //
+    //     %1 = Copy %0
+    //     %3 = Binary %0, %2
+    //
+    // so %1 is no longer used and its Copy can be removed.
+    //
+    // With lowered phis:
+    //
+    //     block 1: %8 = Copy %0
+    //     block 2: %8 = Copy %1
+    //     block 3: return %8
+    //
+    // %8 is still used by the return, so both definitions are preserved.
+    let mut used_values = HashSet::<ValueId>::new();
+
+    for block in &function.blocks {
+        for instruction in &block.instructions {
+            match instruction {
+                IrInstruction::Copy { source, .. } => {
+                    used_values.insert(*source);
+                }
+
+                IrInstruction::StructCopy { source, .. } => {
+                    used_values.insert(*source);
+                }
+
+                IrInstruction::StoreLocal { value, .. } => {
+                    used_values.insert(*value);
+                }
+
+                IrInstruction::StoreField {
+                    receiver, value, ..
+                } => {
+                    used_values.insert(*receiver);
+                    used_values.insert(*value);
+                }
+
+                IrInstruction::LoadField { receiver, .. } => {
+                    used_values.insert(*receiver);
+                }
+
+                IrInstruction::Binary { left, right, .. } => {
+                    used_values.insert(*left);
+                    used_values.insert(*right);
+                }
+
+                IrInstruction::Call { arguments, .. } => {
+                    used_values.extend(arguments.iter().copied());
+                }
+
+                IrInstruction::Phi { sources, .. } => {
+                    used_values.extend(sources.iter().map(|(_, value)| *value));
+                }
+
+                IrInstruction::Parameter { .. }
+                | IrInstruction::ConstInt { .. }
+                | IrInstruction::ConstString { .. }
+                | IrInstruction::ConstBool { .. }
+                | IrInstruction::LoadLocal { .. }
+                | IrInstruction::AllocStruct { .. }
+                | IrInstruction::StackAllocStruct { .. } => {}
+            }
+        }
+
+        match &block.terminator {
+            Terminator::Branch { condition, .. } => {
+                used_values.insert(*condition);
+            }
+
+            Terminator::Return { value: Some(value) } => {
+                used_values.insert(*value);
+            }
+
+            Terminator::Jump(_) | Terminator::Return { value: None } | Terminator::Unreachable => {}
+        }
+    }
+
+    // Remove only copies whose destinations have no remaining uses.
+    //
+    // This is safe for ordinary copies and preserves lowered-phi copies
+    // whenever their destination is still needed by the CFG.
+    for block in &mut function.blocks {
+        block.instructions.retain(|instruction| match instruction {
+            IrInstruction::Copy { destination, .. } => used_values.contains(destination),
+
+            _ => true,
+        });
     }
 
     Ok(())

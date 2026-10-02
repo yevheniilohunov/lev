@@ -12,6 +12,7 @@ use crate::semantic::symbols::FunctionId;
 pub enum CodegenTarget {
     X86_64,
     X86_64MacOS,
+    Aarch64MacOS,
 }
 
 impl Default for CodegenTarget {
@@ -25,6 +26,59 @@ impl CodegenTarget {
         match self {
             CodegenTarget::X86_64MacOS => "_malloc",
             CodegenTarget::X86_64 => "malloc",
+            CodegenTarget::Aarch64MacOS => "_malloc",
+        }
+    }
+
+    pub fn native() -> Self {
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        {
+            return CodegenTarget::Aarch64MacOS;
+        }
+
+        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+        {
+            return CodegenTarget::X86_64MacOS;
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            return CodegenTarget::X86_64;
+        }
+
+        panic!("unsupported host architecture");
+    }
+
+    fn argument_register(self, index: usize) -> Option<&'static str> {
+        match self {
+            CodegenTarget::X86_64 | CodegenTarget::X86_64MacOS => match index {
+                0 => Some("rdi"),
+                1 => Some("rsi"),
+                2 => Some("rdx"),
+                3 => Some("rcx"),
+                4 => Some("r8"),
+                5 => Some("r9"),
+                _ => None,
+            },
+
+            CodegenTarget::Aarch64MacOS => match index {
+                0 => Some("x0"),
+                1 => Some("x1"),
+                2 => Some("x2"),
+                3 => Some("x3"),
+                4 => Some("x4"),
+                5 => Some("x5"),
+                6 => Some("x6"),
+                7 => Some("x7"),
+                _ => None,
+            },
+        }
+    }
+
+    fn return_register(self) -> &'static str {
+        match self {
+            CodegenTarget::X86_64 | CodegenTarget::X86_64MacOS => "rax",
+            CodegenTarget::Aarch64MacOS => "x0",
         }
     }
 }
@@ -32,8 +86,15 @@ impl CodegenTarget {
 pub fn generate(program: &IrProgram, target: CodegenTarget) -> Result<String, Vec<CompilerError>> {
     let mut output = String::new();
 
-    writeln!(output, ".intel_syntax noprefix")
-        .map_err(|error| vec![CompilerError::internal(error.to_string())])?;
+    match target {
+        CodegenTarget::X86_64 | CodegenTarget::X86_64MacOS => {
+            writeln!(output, ".intel_syntax noprefix")
+                .map_err(|error| vec![CompilerError::internal(error.to_string())])?;
+        }
+
+        CodegenTarget::Aarch64MacOS => {}
+    }
+
     writeln!(output, ".text").map_err(|error| vec![CompilerError::internal(error.to_string())])?;
 
     let string_labels = collect_string_literals(program);
@@ -102,6 +163,10 @@ fn emit_string_section(
         }
 
         CodegenTarget::X86_64MacOS => {
+            writeln!(output, ".section __TEXT,__cstring")
+                .map_err(|error| vec![CompilerError::internal(error.to_string())])?;
+        }
+        CodegenTarget::Aarch64MacOS => {
             writeln!(output, ".section __TEXT,__cstring")
                 .map_err(|error| vec![CompilerError::internal(error.to_string())])?;
         }
@@ -246,6 +311,7 @@ impl<'a> FunctionCodegen<'a> {
         match self.target {
             CodegenTarget::X86_64 => name.to_string(),
             CodegenTarget::X86_64MacOS => format!("_{}", name),
+            CodegenTarget::Aarch64MacOS => format!("_{}", name),
         }
     }
 
@@ -338,6 +404,10 @@ impl<'a> FunctionCodegen<'a> {
         copies: &[(ValueId, ValueId)],
     ) -> Result<(), Vec<CompilerError>> {
         let mut pending = copies.to_vec();
+        let temporary_register = match self.target {
+            CodegenTarget::X86_64 | CodegenTarget::X86_64MacOS => "rax",
+            CodegenTarget::Aarch64MacOS => "x16",
+        };
 
         while !pending.is_empty() {
             let sources: HashSet<ValueId> = pending.iter().map(|(source, _)| *source).collect();
@@ -357,8 +427,8 @@ impl<'a> FunctionCodegen<'a> {
                 // Safe when the destination is not needed as a source
                 // by any remaining copy.
                 if !sources.contains(&destination) {
-                    self.emit_load(source, "rax")?;
-                    self.emit_store(destination, "rax")?;
+                    self.emit_load(source, temporary_register)?;
+                    self.emit_store(destination, temporary_register)?;
 
                     pending.remove(index);
                     progress = true;
@@ -386,10 +456,8 @@ impl<'a> FunctionCodegen<'a> {
             // For longer cycles the same backwards traversal works.
             let (source, _) = pending[0];
 
-            self.emit_load(source, "rax")?;
-
-            writeln!(self.output, "    mov [rbp-{}], rax", self.phi_temp_offset)
-                .map_err(|error| vec![CompilerError::internal(error.to_string())])?;
+            self.emit_load(source, temporary_register)?;
+            self.emit_phi_temp_store(temporary_register)?;
 
             // Remove the copy whose source we saved.
             let first_index = pending
@@ -411,17 +479,15 @@ impl<'a> FunctionCodegen<'a> {
 
                 let (next_source, _) = pending.remove(index);
 
-                self.emit_load(next_source, "rax")?;
-                self.emit_store(current_destination, "rax")?;
+                self.emit_load(next_source, temporary_register)?;
+                self.emit_store(current_destination, temporary_register)?;
 
                 current_destination = next_source;
             }
 
             // Complete the cycle with the saved original value.
-            writeln!(self.output, "    mov rax, [rbp-{}]", self.phi_temp_offset)
-                .map_err(|error| vec![CompilerError::internal(error.to_string())])?;
-
-            self.emit_store(current_destination, "rax")?;
+            self.emit_phi_temp_load(temporary_register)?;
+            self.emit_store(current_destination, temporary_register)?;
         }
 
         Ok(())
@@ -457,24 +523,83 @@ impl<'a> FunctionCodegen<'a> {
             return 0;
         }
 
-        // `push rbp` leaves rsp 8 bytes off a 16-byte boundary.
-        // Make the frame size 8 mod 16 so rsp is 16-byte aligned
-        // before any outgoing call.
-        ((required + 23) / 16) * 16 + 8
+        match self.target {
+            CodegenTarget::X86_64 | CodegenTarget::X86_64MacOS => {
+                // `push rbp` leaves rsp 8 bytes off a 16-byte boundary.
+                // Make the frame size 8 mod 16 so rsp is 16-byte aligned
+                // before any outgoing call.
+                ((required + 23) / 16) * 16 + 8
+            }
+
+            CodegenTarget::Aarch64MacOS => {
+                // The ARM64 prologue already pushes x29/x30 in a 16-byte
+                // aligned pair, so the local frame itself must be a
+                // multiple of 16.
+                ((required + 15) / 16) * 16
+            }
+        }
     }
 
     fn emit_prologue(&mut self) -> Result<(), Vec<CompilerError>> {
-        writeln!(self.output, "    push rbp")
-            .map_err(|error| vec![CompilerError::internal(error.to_string())])?;
+        match self.target {
+            CodegenTarget::X86_64 | CodegenTarget::X86_64MacOS => {
+                writeln!(self.output, "    push rbp")
+                    .map_err(|error| vec![CompilerError::internal(error.to_string())])?;
 
-        writeln!(self.output, "    mov rbp, rsp")
-            .map_err(|error| vec![CompilerError::internal(error.to_string())])?;
+                writeln!(self.output, "    mov rbp, rsp")
+                    .map_err(|error| vec![CompilerError::internal(error.to_string())])?;
 
+                let stack_size = self.stack_size();
+
+                if stack_size > 0 {
+                    writeln!(self.output, "    sub rsp, {}", stack_size)
+                        .map_err(|error| vec![CompilerError::internal(error.to_string())])?;
+                }
+            }
+
+            CodegenTarget::Aarch64MacOS => {
+                writeln!(self.output, "    stp x29, x30, [sp, #-16]!")
+                    .map_err(|error| vec![CompilerError::internal(error.to_string())])?;
+
+                writeln!(self.output, "    mov x29, sp")
+                    .map_err(|error| vec![CompilerError::internal(error.to_string())])?;
+
+                let stack_size = self.stack_size();
+
+                if stack_size > 0 {
+                    writeln!(self.output, "    sub sp, sp, #{}", stack_size)
+                        .map_err(|error| vec![CompilerError::internal(error.to_string())])?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn emit_epilogue(&mut self) -> Result<(), Vec<CompilerError>> {
         let stack_size = self.stack_size();
 
-        if stack_size > 0 {
-            writeln!(self.output, "    sub rsp, {}", stack_size)
-                .map_err(|error| vec![CompilerError::internal(error.to_string())])?;
+        match self.target {
+            CodegenTarget::X86_64 | CodegenTarget::X86_64MacOS => {
+                writeln!(self.output, "    leave")
+                    .map_err(|error| vec![CompilerError::internal(error.to_string())])?;
+
+                writeln!(self.output, "    ret")
+                    .map_err(|error| vec![CompilerError::internal(error.to_string())])?;
+            }
+
+            CodegenTarget::Aarch64MacOS => {
+                if stack_size > 0 {
+                    writeln!(self.output, "    add sp, sp, #{}", stack_size)
+                        .map_err(|error| vec![CompilerError::internal(error.to_string())])?;
+                }
+
+                writeln!(self.output, "    ldp x29, x30, [sp], #16")
+                    .map_err(|error| vec![CompilerError::internal(error.to_string())])?;
+
+                writeln!(self.output, "    ret")
+                    .map_err(|error| vec![CompilerError::internal(error.to_string())])?;
+            }
         }
 
         Ok(())
@@ -506,18 +631,6 @@ impl<'a> FunctionCodegen<'a> {
     // Instructions
     // ---------------------------------------------------------------------
 
-    fn argument_register(index: usize) -> Option<&'static str> {
-        match index {
-            0 => Some("rdi"),
-            1 => Some("rsi"),
-            2 => Some("rdx"),
-            3 => Some("rcx"),
-            4 => Some("r8"),
-            5 => Some("r9"),
-            _ => None,
-        }
-    }
-
     fn emit_instruction(&mut self, instruction: &IrInstruction) -> Result<(), Vec<CompilerError>> {
         match instruction {
             IrInstruction::Parameter { destination, local } => {
@@ -534,21 +647,34 @@ impl<'a> FunctionCodegen<'a> {
                         ))]
                     })?;
 
-                let register = Self::argument_register(parameter_index).ok_or_else(|| {
-                    vec![CompilerError::internal(format!(
-                        "more than six integer parameters are not supported yet"
-                    ))]
-                })?;
+                let register = self
+                    .target
+                    .argument_register(parameter_index)
+                    .ok_or_else(|| {
+                        vec![CompilerError::internal(format!(
+                            "more than six integer parameters are not supported yet"
+                        ))]
+                    })?;
 
-                writeln!(self.output, "    mov rax, {}", register)
+                let temporary_register = match self.target {
+                    CodegenTarget::X86_64 | CodegenTarget::X86_64MacOS => "rax",
+                    CodegenTarget::Aarch64MacOS => "x16",
+                };
+
+                writeln!(self.output, "    mov {}, {}", temporary_register, register)
                     .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
 
-                self.emit_store(*destination, "rax")?;
+                self.emit_store(*destination, temporary_register)?;
             }
 
             IrInstruction::ConstInt { destination, value } => {
-                self.emit_load_immediate("rax", *value)?;
-                self.emit_store(*destination, "rax")?;
+                let temporary_register = match self.target {
+                    CodegenTarget::X86_64 | CodegenTarget::X86_64MacOS => "rax",
+                    CodegenTarget::Aarch64MacOS => "x16",
+                };
+
+                self.emit_load_immediate(temporary_register, *value)?;
+                self.emit_store(*destination, temporary_register)?;
             }
 
             IrInstruction::ConstString { destination, value } => {
@@ -559,19 +685,36 @@ impl<'a> FunctionCodegen<'a> {
                     ))]
                 })?;
 
-                writeln!(self.output, "    lea rax, [rip + {}]", label)
-                    .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                match self.target {
+                    CodegenTarget::X86_64 | CodegenTarget::X86_64MacOS => {
+                        writeln!(self.output, "    lea rax, [rip + {}]", label)
+                            .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
 
-                self.emit_store(*destination, "rax")?;
+                        self.emit_store(*destination, "rax")?;
+                    }
+
+                    CodegenTarget::Aarch64MacOS => {
+                        writeln!(self.output, "    adrp x16, {}", label)
+                            .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+
+                        writeln!(self.output, "    add x16, x16, :lo12:{}", label)
+                            .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+
+                        self.emit_store(*destination, "x16")?;
+                    }
+                }
             }
 
             IrInstruction::ConstBool { destination, value } => {
                 let value = if *value { 1 } else { 0 };
 
-                writeln!(self.output, "    mov rax, {}", value)
-                    .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                let temporary_register = match self.target {
+                    CodegenTarget::X86_64 | CodegenTarget::X86_64MacOS => "rax",
+                    CodegenTarget::Aarch64MacOS => "x16",
+                };
 
-                self.emit_store(*destination, "rax")?;
+                self.emit_load_immediate(temporary_register, value)?;
+                self.emit_store(*destination, temporary_register)?;
             }
 
             IrInstruction::LoadLocal {
@@ -596,59 +739,104 @@ impl<'a> FunctionCodegen<'a> {
                 op,
                 left,
                 right,
-            } => {
-                self.emit_load(*left, "rax")?;
-                self.emit_load(*right, "rcx")?;
+            } => match self.target {
+                CodegenTarget::X86_64 | CodegenTarget::X86_64MacOS => {
+                    self.emit_load(*left, "rax")?;
+                    self.emit_load(*right, "rcx")?;
 
-                match op {
-                    IrBinaryOp::Add => {
-                        writeln!(self.output, "    add rax, rcx")
-                            .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                    match op {
+                        IrBinaryOp::Add => {
+                            writeln!(self.output, "    add rax, rcx")
+                                .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                        }
+
+                        IrBinaryOp::Subtract => {
+                            writeln!(self.output, "    sub rax, rcx")
+                                .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                        }
+
+                        IrBinaryOp::Multiply => {
+                            writeln!(self.output, "    imul rax, rcx")
+                                .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                        }
+
+                        IrBinaryOp::Divide => {
+                            writeln!(self.output, "    cqo")
+                                .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+
+                            writeln!(self.output, "    idiv rcx")
+                                .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                        }
+
+                        IrBinaryOp::Equal => {
+                            writeln!(self.output, "    cmp rax, rcx")
+                                .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+
+                            writeln!(self.output, "    sete al")
+                                .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+
+                            writeln!(self.output, "    movzx rax, al")
+                                .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                        }
                     }
 
-                    IrBinaryOp::Subtract => {
-                        writeln!(self.output, "    sub rax, rcx")
-                            .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
-                    }
-
-                    IrBinaryOp::Multiply => {
-                        writeln!(self.output, "    imul rax, rcx")
-                            .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
-                    }
-
-                    IrBinaryOp::Divide => {
-                        writeln!(self.output, "    cqo")
-                            .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
-
-                        writeln!(self.output, "    idiv rcx")
-                            .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
-                    }
-
-                    IrBinaryOp::Equal => {
-                        writeln!(self.output, "    cmp rax, rcx")
-                            .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
-
-                        writeln!(self.output, "    sete al")
-                            .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
-
-                        writeln!(self.output, "    movzx rax, al")
-                            .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
-                    }
+                    self.emit_store(*destination, "rax")?;
                 }
 
-                self.emit_store(*destination, "rax")?;
-            }
+                CodegenTarget::Aarch64MacOS => {
+                    self.emit_load(*left, "x16")?;
+                    self.emit_load(*right, "x17")?;
+
+                    match op {
+                        IrBinaryOp::Add => {
+                            writeln!(self.output, "    add x16, x16, x17")
+                                .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                        }
+
+                        IrBinaryOp::Subtract => {
+                            writeln!(self.output, "    sub x16, x16, x17")
+                                .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                        }
+
+                        IrBinaryOp::Multiply => {
+                            writeln!(self.output, "    mul x16, x16, x17")
+                                .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                        }
+
+                        IrBinaryOp::Divide => {
+                            writeln!(self.output, "    sdiv x16, x16, x17")
+                                .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                        }
+
+                        IrBinaryOp::Equal => {
+                            writeln!(self.output, "    cmp x16, x17")
+                                .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+
+                            writeln!(self.output, "    cset x16, eq")
+                                .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                        }
+                    }
+
+                    self.emit_store(*destination, "x16")?;
+                }
+            },
 
             IrInstruction::Call {
                 destination,
                 function,
                 arguments,
             } => {
-                if arguments.len() > 6 {
+                let max_arguments = match self.target {
+                    CodegenTarget::X86_64 | CodegenTarget::X86_64MacOS => 6,
+                    CodegenTarget::Aarch64MacOS => 8,
+                };
+
+                if arguments.len() > max_arguments {
                     return Err(vec![CompilerError::internal(format!(
-                        "function call has {} arguments, but only 6 integer arguments are currently supported",
-                        arguments.len()
-                    ))]);
+                            "function call has {} arguments, but only {} integer arguments are currently supported",
+                            arguments.len(),
+                            max_arguments
+                     ))]);
                 }
 
                 let function_name = self.function_names.get(&Some(*function)).ok_or_else(|| {
@@ -659,7 +847,7 @@ impl<'a> FunctionCodegen<'a> {
                 })?;
 
                 for (index, argument) in arguments.iter().enumerate() {
-                    let register = Self::argument_register(index).ok_or_else(|| {
+                    let register = self.target.argument_register(index).ok_or_else(|| {
                         vec![CompilerError::internal(format!(
                             "no argument register available for argument {}",
                             index
@@ -671,11 +859,21 @@ impl<'a> FunctionCodegen<'a> {
 
                 let symbol = self.symbol_name(function_name);
 
-                writeln!(self.output, "    call {}", symbol)
-                    .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                match self.target {
+                    CodegenTarget::X86_64 | CodegenTarget::X86_64MacOS => {
+                        writeln!(self.output, "    call {}", symbol)
+                            .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                    }
+
+                    CodegenTarget::Aarch64MacOS => {
+                        writeln!(self.output, "    bl {}", symbol)
+                            .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                    }
+                }
 
                 if let Some(destination) = destination {
-                    self.emit_store_value(*destination, "rax")?;
+                    let return_register = self.target.return_register();
+                    self.emit_store_value(*destination, return_register)?;
                 }
             }
 
@@ -690,17 +888,35 @@ impl<'a> FunctionCodegen<'a> {
             } => {
                 let offset = (*field as i32) * 8;
 
-                self.emit_load(*receiver, "rax")?;
+                match self.target {
+                    CodegenTarget::X86_64 | CodegenTarget::X86_64MacOS => {
+                        self.emit_load(*receiver, "rax")?;
 
-                if offset == 0 {
-                    writeln!(self.output, "    mov rax, [rax]")
-                        .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
-                } else {
-                    writeln!(self.output, "    mov rax, [rax+{}]", offset)
-                        .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                        if offset == 0 {
+                            writeln!(self.output, "    mov rax, [rax]")
+                                .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                        } else {
+                            writeln!(self.output, "    mov rax, [rax+{}]", offset)
+                                .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                        }
+
+                        self.emit_store(*destination, "rax")?;
+                    }
+
+                    CodegenTarget::Aarch64MacOS => {
+                        self.emit_load(*receiver, "x16")?;
+
+                        if offset == 0 {
+                            writeln!(self.output, "    ldr x16, [x16]")
+                                .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                        } else {
+                            writeln!(self.output, "    ldr x16, [x16, #{}]", offset)
+                                .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                        }
+
+                        self.emit_store(*destination, "x16")?;
+                    }
                 }
-
-                self.emit_store(*destination, "rax")?;
             }
             IrInstruction::AllocStruct {
                 destination,
@@ -720,13 +936,27 @@ impl<'a> FunctionCodegen<'a> {
 
                 let size = (structure.fields.len() as i32) * 8;
 
-                writeln!(self.output, "    mov rdi, {}", size)
-                    .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                match self.target {
+                    CodegenTarget::X86_64 | CodegenTarget::X86_64MacOS => {
+                        writeln!(self.output, "    mov rdi, {}", size)
+                            .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
 
-                writeln!(self.output, "    call {}", self.target.malloc_symbol())
-                    .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                        writeln!(self.output, "    call {}", self.target.malloc_symbol())
+                            .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
 
-                self.emit_store(*destination, "rax")?;
+                        self.emit_store(*destination, "rax")?;
+                    }
+
+                    CodegenTarget::Aarch64MacOS => {
+                        writeln!(self.output, "    mov x0, #{}", size)
+                            .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+
+                        writeln!(self.output, "    bl {}", self.target.malloc_symbol())
+                            .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+
+                        self.emit_store(*destination, "x0")?;
+                    }
+                }
             }
             IrInstruction::StoreField {
                 receiver,
@@ -735,15 +965,32 @@ impl<'a> FunctionCodegen<'a> {
             } => {
                 let offset = (*field as i32) * 8;
 
-                self.emit_load(*receiver, "rax")?;
-                self.emit_load(*value, "rcx")?;
+                match self.target {
+                    CodegenTarget::X86_64 | CodegenTarget::X86_64MacOS => {
+                        self.emit_load(*receiver, "rax")?;
+                        self.emit_load(*value, "rcx")?;
 
-                if offset == 0 {
-                    writeln!(self.output, "    mov [rax], rcx")
-                        .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
-                } else {
-                    writeln!(self.output, "    mov [rax+{}], rcx", offset)
-                        .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                        if offset == 0 {
+                            writeln!(self.output, "    mov [rax], rcx")
+                                .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                        } else {
+                            writeln!(self.output, "    mov [rax+{}], rcx", offset)
+                                .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                        }
+                    }
+
+                    CodegenTarget::Aarch64MacOS => {
+                        self.emit_load(*receiver, "x16")?;
+                        self.emit_load(*value, "x17")?;
+
+                        if offset == 0 {
+                            writeln!(self.output, "    str x17, [x16]")
+                                .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                        } else {
+                            writeln!(self.output, "    str x17, [x16, #{}]", offset)
+                                .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                        }
+                    }
                 }
             }
             IrInstruction::StructCopy {
@@ -774,37 +1021,73 @@ impl<'a> FunctionCodegen<'a> {
                         ))]
                     })?;
 
-                self.emit_load(*source, "rax")?;
+                match self.target {
+                    CodegenTarget::X86_64 | CodegenTarget::X86_64MacOS => {
+                        self.emit_load(*source, "rax")?;
 
-                writeln!(self.output, "    lea rdx, [rbp-{}]", destination_offset)
-                    .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
-
-                for field_index in 0..structure.fields.len() {
-                    let offset = (field_index as i32) * 8;
-
-                    if offset == 0 {
-                        writeln!(self.output, "    mov rcx, [rax]")
+                        writeln!(self.output, "    lea rdx, [rbp-{}]", destination_offset)
                             .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
 
-                        writeln!(self.output, "    mov [rdx], rcx")
-                            .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
-                    } else {
-                        writeln!(self.output, "    mov rcx, [rax+{}]", offset)
+                        for field_index in 0..structure.fields.len() {
+                            let offset = (field_index as i32) * 8;
+
+                            if offset == 0 {
+                                writeln!(self.output, "    mov rcx, [rax]")
+                                    .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+
+                                writeln!(self.output, "    mov [rdx], rcx")
+                                    .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                            } else {
+                                writeln!(self.output, "    mov rcx, [rax+{}]", offset)
+                                    .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+
+                                writeln!(self.output, "    mov [rdx+{}], rcx", offset)
+                                    .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                            }
+                        }
+
+                        self.emit_store(*destination, "rdx")?;
+                    }
+
+                    CodegenTarget::Aarch64MacOS => {
+                        self.emit_load(*source, "x16")?;
+
+                        writeln!(self.output, "    sub x17, x29, #{}", destination_offset)
                             .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
 
-                        writeln!(self.output, "    mov [rdx+{}], rcx", offset)
-                            .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                        for field_index in 0..structure.fields.len() {
+                            let offset = (field_index as i32) * 8;
+
+                            if offset == 0 {
+                                writeln!(self.output, "    ldr x15, [x16]")
+                                    .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+
+                                writeln!(self.output, "    str x15, [x17]")
+                                    .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                            } else {
+                                writeln!(self.output, "    ldr x15, [x16, #{}]", offset)
+                                    .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+
+                                writeln!(self.output, "    str x15, [x17, #{}]", offset)
+                                    .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                            }
+                        }
+
+                        self.emit_store(*destination, "x17")?;
                     }
                 }
-
-                self.emit_store(*destination, "rdx")?;
             }
             IrInstruction::Copy {
                 destination,
                 source,
             } => {
-                self.emit_load(*source, "rax")?;
-                self.emit_store(*destination, "rax")?;
+                let temporary_register = match self.target {
+                    CodegenTarget::X86_64 | CodegenTarget::X86_64MacOS => "rax",
+                    CodegenTarget::Aarch64MacOS => "x16",
+                };
+
+                self.emit_load(*source, temporary_register)?;
+                self.emit_store(*destination, temporary_register)?;
             }
             IrInstruction::StackAllocStruct {
                 destination,
@@ -829,10 +1112,68 @@ impl<'a> FunctionCodegen<'a> {
                         ))]
                     })?;
 
-                writeln!(self.output, "    lea rax, [rbp-{}]", offset)
-                    .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                match self.target {
+                    CodegenTarget::X86_64 | CodegenTarget::X86_64MacOS => {
+                        writeln!(self.output, "    lea rax, [rbp-{}]", offset)
+                            .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                        self.emit_store(*destination, "rax")?;
+                    }
 
-                self.emit_store(*destination, "rax")?;
+                    CodegenTarget::Aarch64MacOS => {
+                        writeln!(self.output, "    sub x16, x29, #{}", offset)
+                            .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+
+                        self.emit_store(*destination, "x16")?;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn emit_phi_temp_store(&mut self, register: &str) -> Result<(), Vec<CompilerError>> {
+        match self.target {
+            CodegenTarget::X86_64 | CodegenTarget::X86_64MacOS => {
+                writeln!(
+                    self.output,
+                    "    mov [rbp-{}], {}",
+                    self.phi_temp_offset, register
+                )
+                .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+            }
+
+            CodegenTarget::Aarch64MacOS => {
+                writeln!(
+                    self.output,
+                    "    str {}, [x29, #-{}]",
+                    register, self.phi_temp_offset
+                )
+                .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn emit_phi_temp_load(&mut self, register: &str) -> Result<(), Vec<CompilerError>> {
+        match self.target {
+            CodegenTarget::X86_64 | CodegenTarget::X86_64MacOS => {
+                writeln!(
+                    self.output,
+                    "    mov {}, [rbp-{}]",
+                    register, self.phi_temp_offset
+                )
+                .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+            }
+
+            CodegenTarget::Aarch64MacOS => {
+                writeln!(
+                    self.output,
+                    "    ldr {}, [x29, #-{}]",
+                    register, self.phi_temp_offset
+                )
+                .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
             }
         }
 
@@ -851,8 +1192,17 @@ impl<'a> FunctionCodegen<'a> {
             ))]
         })?;
 
-        writeln!(self.output, "    mov {}, [rbp-{}]", register, offset)
-            .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+        match self.target {
+            CodegenTarget::X86_64 | CodegenTarget::X86_64MacOS => {
+                writeln!(self.output, "    mov {}, [rbp-{}]", register, offset)
+                    .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+            }
+
+            CodegenTarget::Aarch64MacOS => {
+                writeln!(self.output, "    ldr {}, [x29, #-{}]", register, offset)
+                    .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+            }
+        }
 
         Ok(())
     }
@@ -869,8 +1219,17 @@ impl<'a> FunctionCodegen<'a> {
             ))]
         })?;
 
-        writeln!(self.output, "    mov [rbp-{}], {}", offset, register)
-            .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+        match self.target {
+            CodegenTarget::X86_64 | CodegenTarget::X86_64MacOS => {
+                writeln!(self.output, "    mov [rbp-{}], {}", offset, register)
+                    .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+            }
+
+            CodegenTarget::Aarch64MacOS => {
+                writeln!(self.output, "    str {}, [x29, #-{}]", register, offset)
+                    .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+            }
+        }
 
         Ok(())
     }
@@ -888,43 +1247,70 @@ impl<'a> FunctionCodegen<'a> {
             Terminator::Jump(block) => {
                 self.emit_edge_copies(predecessor, *block)?;
 
-                writeln!(self.output, "    jmp {}", self.block_label(*block))
-                    .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                match self.target {
+                    CodegenTarget::X86_64 | CodegenTarget::X86_64MacOS => {
+                        writeln!(self.output, "    jmp {}", self.block_label(*block))
+                            .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                    }
+                    CodegenTarget::Aarch64MacOS => {
+                        writeln!(self.output, "    b {}", self.block_label(*block))
+                            .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                    }
+                }
             }
 
             Terminator::Branch {
                 condition,
                 then_block,
                 else_block,
-            } => {
-                self.emit_load(*condition, "rax")?;
+            } => match self.target {
+                CodegenTarget::X86_64 | CodegenTarget::X86_64MacOS => {
+                    self.emit_load(*condition, "rax")?;
 
-                writeln!(self.output, "    cmp rax, 0")
-                    .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                    writeln!(self.output, "    cmp rax, 0")
+                        .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
 
-                writeln!(self.output, "    jne {}", self.block_label(*then_block))
-                    .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                    writeln!(self.output, "    jne {}", self.block_label(*then_block))
+                        .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
 
-                writeln!(self.output, "    jmp {}", self.block_label(*else_block))
-                    .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
-            }
+                    writeln!(self.output, "    jmp {}", self.block_label(*else_block))
+                        .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                }
+
+                CodegenTarget::Aarch64MacOS => {
+                    self.emit_load(*condition, "x0")?;
+
+                    writeln!(self.output, "    cmp x0, #0")
+                        .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+
+                    writeln!(self.output, "    b.ne {}", self.block_label(*then_block))
+                        .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+
+                    writeln!(self.output, "    b {}", self.block_label(*else_block))
+                        .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                }
+            },
 
             Terminator::Return { value } => {
                 if let Some(value) = value {
-                    self.emit_load(*value, "rax")?;
+                    let register = self.target.return_register();
+                    self.emit_load(*value, register)?;
                 }
 
-                writeln!(self.output, "    leave")
-                    .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
-
-                writeln!(self.output, "    ret")
-                    .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                self.emit_epilogue()?;
             }
 
-            Terminator::Unreachable => {
-                writeln!(self.output, "    ud2")
-                    .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
-            }
+            Terminator::Unreachable => match self.target {
+                CodegenTarget::X86_64 | CodegenTarget::X86_64MacOS => {
+                    writeln!(self.output, "    ud2")
+                        .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                }
+
+                CodegenTarget::Aarch64MacOS => {
+                    writeln!(self.output, "    brk #0")
+                        .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+                }
+            },
         }
 
         Ok(())
@@ -942,8 +1328,17 @@ impl<'a> FunctionCodegen<'a> {
             ))]
         })?;
 
-        writeln!(self.output, "    mov {}, [rbp-{}]", register, offset)
-            .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+        match self.target {
+            CodegenTarget::X86_64 | CodegenTarget::X86_64MacOS => {
+                writeln!(self.output, "    mov {}, [rbp-{}]", register, offset)
+                    .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+            }
+
+            CodegenTarget::Aarch64MacOS => {
+                writeln!(self.output, "    ldr {}, [x29, #-{}]", register, offset)
+                    .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+            }
+        }
 
         Ok(())
     }
@@ -956,8 +1351,17 @@ impl<'a> FunctionCodegen<'a> {
             ))]
         })?;
 
-        writeln!(self.output, "    mov [rbp-{}], {}", offset, register)
-            .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+        match self.target {
+            CodegenTarget::X86_64 | CodegenTarget::X86_64MacOS => {
+                writeln!(self.output, "    mov [rbp-{}], {}", offset, register)
+                    .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+            }
+
+            CodegenTarget::Aarch64MacOS => {
+                writeln!(self.output, "    str {}, [x29, #-{}]", register, offset)
+                    .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+            }
+        }
 
         Ok(())
     }
@@ -967,17 +1371,20 @@ impl<'a> FunctionCodegen<'a> {
         register: &str,
         value: i64,
     ) -> Result<(), Vec<CompilerError>> {
-        writeln!(self.output, "    mov {}, {}", register, value)
-            .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+        match self.target {
+            CodegenTarget::X86_64 | CodegenTarget::X86_64MacOS => {
+                writeln!(self.output, "    mov {}, {}", register, value)
+                    .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+            }
+
+            CodegenTarget::Aarch64MacOS => {
+                writeln!(self.output, "    mov {}, #{}", register, value)
+                    .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
+            }
+        }
 
         Ok(())
     }
-
-    // fn block_label(&self, block: BlockId) -> String {
-    //     let symbol = self.symbol_name(&self.function.name);
-
-    //     format!(".L{}_{}", symbol, block.0)
-    // }
 }
 
 // -------------------------------------------------------------------------

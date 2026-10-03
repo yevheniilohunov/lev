@@ -51,7 +51,7 @@ fn main() -> miette::Result<()> {
 
     let target = CodegenTarget::native();
 
-    eprintln!("target: {:?}", target);
+    // eprintln!("target: {:?}", target);
 
     let assembly = match codegen::generate(&program, CodegenTarget::native()) {
         Ok(assembly) => assembly,

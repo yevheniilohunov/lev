@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{
     compiler::error::CompilerError,
-    ir::{BlockId, IrInstruction, Terminator, ValueId},
+    ir::{BlockId, IrInstruction, IrType, Terminator, ValueId},
     semantic::symbols::LocalId,
 };
 
@@ -2471,6 +2471,20 @@ fn eliminate_dead_field_stores_function(
 
     let mut successors = HashMap::<BlockId, Vec<BlockId>>::new();
 
+    let mut parameter_values = HashSet::<ValueId>::new();
+
+    for block in &function.blocks {
+        for instruction in &block.instructions {
+            if let IrInstruction::Parameter { destination, local } = instruction {
+                if function.parameters.iter().any(|parameter| {
+                    parameter.id == *local && matches!(parameter.ty, IrType::Struct(_))
+                }) {
+                    parameter_values.insert(*destination);
+                }
+            }
+        }
+    }
+
     for block in &function.blocks {
         let targets = match block.terminator {
             Terminator::Jump(destination) => vec![destination],
@@ -2543,6 +2557,7 @@ fn eliminate_dead_field_stores_function(
             let mut live = new_live_out.clone();
             let mut call_live = new_call_live_out;
             let mut escaped = new_escaped_out.clone();
+            escaped.extend(&parameter_values);
 
             // A returned object escapes the function. Its fields may be
             // observed by the caller, so stores to it must be preserved.
@@ -2630,6 +2645,7 @@ fn eliminate_dead_field_stores_function(
         let mut live = live_out.get(&block.id).cloned().unwrap_or_default();
         let mut call_live = call_live_out.get(&block.id).copied().unwrap_or(false);
         let mut escaped = escaped_out.get(&block.id).cloned().unwrap_or_default();
+        escaped.extend(&parameter_values);
 
         if let Terminator::Return { value: Some(value) } = block.terminator {
             escaped.insert(value);

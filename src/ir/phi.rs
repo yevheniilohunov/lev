@@ -49,7 +49,6 @@ fn instruction_destination(instruction: &IrInstruction) -> Option<ValueId> {
         | IrInstruction::LoadLocal { destination, .. }
         | IrInstruction::Copy { destination, .. }
         | IrInstruction::StructCopy { destination, .. }
-        | IrInstruction::AllocStruct { destination, .. }
         | IrInstruction::LoadField { destination, .. }
         | IrInstruction::Binary { destination, .. }
         | IrInstruction::Phi { destination, .. } => Some(*destination),
@@ -58,6 +57,7 @@ fn instruction_destination(instruction: &IrInstruction) -> Option<ValueId> {
 
         IrInstruction::StoreLocal { .. } | IrInstruction::StoreField { .. } => None,
         IrInstruction::StackAllocStruct { destination, .. } => Some(*destination),
+        IrInstruction::StructCall { destination, .. } => Some(*destination),
     }
 }
 

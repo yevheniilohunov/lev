@@ -6,7 +6,7 @@ mod parser;
 mod semantic;
 
 use std::{
-    env, fs,
+    fs,
     process::{self, Command},
 };
 

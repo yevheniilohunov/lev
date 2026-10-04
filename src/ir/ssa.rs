@@ -402,15 +402,6 @@ fn rename_block(
             IrInstruction::Phi { .. } => {
                 unreachable!("Phi instructions were separated above");
             }
-            IrInstruction::AllocStruct {
-                destination,
-                struct_id,
-            } => {
-                new_instructions.push(IrInstruction::AllocStruct {
-                    destination,
-                    struct_id,
-                });
-            }
 
             IrInstruction::StoreField {
                 receiver,
@@ -474,6 +465,12 @@ fn rename_block(
                     struct_id,
                 });
             }
+            IrInstruction::StructCall {
+                destination,
+                function,
+                arguments,
+                struct_id,
+            } => todo!(),
         }
     }
 
@@ -692,7 +689,6 @@ fn instruction_destination(instruction: &IrInstruction) -> Option<ValueId> {
         | IrInstruction::LoadLocal { destination, .. }
         | IrInstruction::Binary { destination, .. }
         | IrInstruction::LoadField { destination, .. }
-        | IrInstruction::AllocStruct { destination, .. }
         | IrInstruction::Copy { destination, .. }
         | IrInstruction::StructCopy { destination, .. }
         | IrInstruction::Phi { destination, .. } => Some(*destination),
@@ -702,5 +698,6 @@ fn instruction_destination(instruction: &IrInstruction) -> Option<ValueId> {
         IrInstruction::StoreLocal { .. } => None,
         IrInstruction::StoreField { .. } => None,
         IrInstruction::StackAllocStruct { destination, .. } => Some(*destination),
+        IrInstruction::StructCall { destination, .. } => Some(*destination),
     }
 }

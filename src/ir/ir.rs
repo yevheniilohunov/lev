@@ -92,14 +92,16 @@ pub enum IrInstruction {
         struct_id: StructId,
     },
 
+    StructCall {
+        destination: ValueId,
+        function: FunctionId,
+        arguments: Vec<ValueId>,
+        struct_id: StructId,
+    },
+
     StoreLocal {
         local: LocalId,
         value: ValueId,
-    },
-
-    AllocStruct {
-        destination: ValueId,
-        struct_id: StructId,
     },
 
     StackAllocStruct {

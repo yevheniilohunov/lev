@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{
     compiler::error::CompilerError,
-    ir::{BlockId, IrInstruction, IrType, Terminator, ValueId},
+    ir::{BlockId, IrInstruction, IrStruct, IrType, Terminator, ValueId},
     semantic::symbols::LocalId,
 };
 
@@ -394,9 +394,14 @@ fn eliminate_dead_code_from_function(function: &mut IrFunction) -> Result<(), Ve
                     | IrInstruction::ConstBool { .. }
                     | IrInstruction::LoadLocal { .. }
                     | IrInstruction::StoreLocal { .. }
-                    | IrInstruction::AllocStruct { .. }
                     | IrInstruction::StackAllocStruct { .. }
                     | IrInstruction::StoreField { .. } => {}
+                    IrInstruction::StructCall {
+                        destination,
+                        function,
+                        arguments,
+                        struct_id,
+                    } => todo!(),
                 }
             }
         }
@@ -446,7 +451,6 @@ fn instruction_destination(instruction: &IrInstruction) -> Option<ValueId> {
         | IrInstruction::LoadLocal { destination, .. }
         | IrInstruction::Copy { destination, .. }
         | IrInstruction::StructCopy { destination, .. }
-        | IrInstruction::AllocStruct { destination, .. }
         | IrInstruction::LoadField { destination, .. }
         | IrInstruction::Binary { destination, .. }
         | IrInstruction::StackAllocStruct { destination, .. }
@@ -455,6 +459,7 @@ fn instruction_destination(instruction: &IrInstruction) -> Option<ValueId> {
         IrInstruction::Call { destination, .. } => *destination,
 
         IrInstruction::StoreLocal { .. } | IrInstruction::StoreField { .. } => None,
+        IrInstruction::StructCall { destination, .. } => Some(*destination),
     }
 }
 
@@ -995,8 +1000,13 @@ fn copy_propagate_function(function: &mut IrFunction) -> Result<(), Vec<Compiler
                 | IrInstruction::ConstString { .. }
                 | IrInstruction::ConstBool { .. }
                 | IrInstruction::LoadLocal { .. }
-                | IrInstruction::AllocStruct { .. }
                 | IrInstruction::StackAllocStruct { .. } => {}
+                IrInstruction::StructCall {
+                    destination,
+                    function,
+                    arguments,
+                    struct_id,
+                } => todo!(),
             }
         }
 
@@ -1287,8 +1297,13 @@ fn rewrite_instruction_values(instruction: &mut IrInstruction, copies: &HashMap<
         | IrInstruction::ConstString { .. }
         | IrInstruction::ConstBool { .. }
         | IrInstruction::LoadLocal { .. }
-        | IrInstruction::StackAllocStruct { .. }
-        | IrInstruction::AllocStruct { .. } => {}
+        | IrInstruction::StackAllocStruct { .. } => {}
+        IrInstruction::StructCall {
+            destination,
+            function,
+            arguments,
+            struct_id,
+        } => todo!(),
     }
 }
 
@@ -1975,21 +1990,19 @@ fn eliminate_dead_stores_function(function: &mut IrFunction) -> Result<(), Vec<C
     let mut successors = HashMap::<BlockId, Vec<BlockId>>::new();
 
     for block in &function.blocks {
-        let targets = match block.terminator {
-            Terminator::Jump(destination) => vec![destination],
-
+        let targets = match &block.terminator {
+            Terminator::Jump(destination) => vec![*destination],
             Terminator::Branch {
                 then_block,
                 else_block,
                 ..
             } => {
                 if then_block == else_block {
-                    vec![then_block]
+                    vec![*then_block]
                 } else {
-                    vec![then_block, else_block]
+                    vec![*then_block, *else_block]
                 }
             }
-
             Terminator::Return { .. } | Terminator::Unreachable => Vec::new(),
         };
 
@@ -2004,7 +2017,32 @@ fn eliminate_dead_stores_function(function: &mut IrFunction) -> Result<(), Vec<C
         live_out.insert(block.id, HashSet::new());
     }
 
+    // Fixed-point liveness analysis.
+    // Each set contains only LocalIds used by this finite function.
+    let mut iterations = 0usize;
+    let max_iterations = function
+        .blocks
+        .len()
+        .saturating_mul(
+            function
+                .locals
+                .len()
+                .saturating_add(function.parameters.len()),
+        )
+        .saturating_add(1)
+        .saturating_mul(4)
+        .max(100);
+
     loop {
+        iterations += 1;
+
+        if iterations > max_iterations {
+            return Err(vec![CompilerError::internal(format!(
+                "dead-store liveness analysis did not converge in function '{}'",
+                function.name
+            ))]);
+        }
+
         let mut changed = false;
 
         for block in function.blocks.iter().rev() {
@@ -2013,7 +2051,7 @@ fn eliminate_dead_stores_function(function: &mut IrFunction) -> Result<(), Vec<C
             if let Some(block_successors) = successors.get(&block.id) {
                 for successor in block_successors {
                     if let Some(successor_live_in) = live_in.get(successor) {
-                        new_live_out.extend(successor_live_in);
+                        new_live_out.extend(successor_live_in.iter().copied());
                     }
                 }
             }
@@ -2025,11 +2063,9 @@ fn eliminate_dead_stores_function(function: &mut IrFunction) -> Result<(), Vec<C
                     IrInstruction::LoadLocal { local, .. } => {
                         live.insert(*local);
                     }
-
                     IrInstruction::StoreLocal { local, .. } => {
                         live.remove(local);
                     }
-
                     _ => {}
                 }
             }
@@ -2050,9 +2086,9 @@ fn eliminate_dead_stores_function(function: &mut IrFunction) -> Result<(), Vec<C
         }
     }
 
+    // Remove dead local stores after liveness has converged.
     for block in &mut function.blocks {
         let mut live = live_out.get(&block.id).cloned().unwrap_or_default();
-
         let mut remove = HashSet::<usize>::new();
 
         for (index, instruction) in block.instructions.iter().enumerate().rev() {
@@ -2060,21 +2096,18 @@ fn eliminate_dead_stores_function(function: &mut IrFunction) -> Result<(), Vec<C
                 IrInstruction::LoadLocal { local, .. } => {
                     live.insert(*local);
                 }
-
                 IrInstruction::StoreLocal { local, .. } => {
-                    if live.contains(local) {
-                        live.remove(local);
+                    if live.remove(local) {
+                        // A later use observes this store.
                     } else {
                         remove.insert(index);
                     }
                 }
-
                 _ => {}
             }
         }
 
-        let mut index = 0;
-
+        let mut index = 0usize;
         block.instructions.retain(|_| {
             let keep = !remove.contains(&index);
             index += 1;
@@ -2154,6 +2187,300 @@ fn merge_linear_blocks_function(function: &mut IrFunction) -> Result<(), Vec<Com
     }
 
     renumber_blocks(function);
+
+    Ok(())
+}
+
+pub fn eliminate_dead_field_stores(program: &mut IrProgram) -> Result<(), Vec<CompilerError>> {
+    let mut errors = Vec::new();
+
+    for function in &mut program.functions {
+        if let Err(error) = eliminate_dead_field_stores_function(function, &program.structs) {
+            errors.extend(error);
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+fn eliminate_dead_field_stores_function(
+    function: &mut IrFunction,
+    structs: &[IrStruct],
+) -> Result<(), Vec<CompilerError>> {
+    type FieldKey = (ValueId, usize);
+
+    let mut successors = HashMap::<BlockId, Vec<BlockId>>::new();
+
+    // Struct pointers passed as parameters may refer to caller-visible storage.
+    let mut parameter_values = HashSet::<ValueId>::new();
+
+    for block in &function.blocks {
+        for instruction in &block.instructions {
+            if let IrInstruction::Parameter { destination, local } = instruction {
+                if function.parameters.iter().any(|parameter| {
+                    parameter.id == *local && matches!(parameter.ty, IrType::Struct(_))
+                }) {
+                    parameter_values.insert(*destination);
+                }
+            }
+        }
+    }
+
+    for block in &function.blocks {
+        let targets = match &block.terminator {
+            Terminator::Jump(destination) => vec![*destination],
+            Terminator::Branch {
+                then_block,
+                else_block,
+                ..
+            } => {
+                if then_block == else_block {
+                    vec![*then_block]
+                } else {
+                    vec![*then_block, *else_block]
+                }
+            }
+            Terminator::Return { .. } | Terminator::Unreachable => Vec::new(),
+        };
+
+        successors.insert(block.id, targets);
+    }
+
+    let mut live_in = HashMap::<BlockId, HashSet<FieldKey>>::new();
+    let mut live_out = HashMap::<BlockId, HashSet<FieldKey>>::new();
+    let mut call_live_in = HashMap::<BlockId, bool>::new();
+    let mut call_live_out = HashMap::<BlockId, bool>::new();
+    let mut escaped_in = HashMap::<BlockId, HashSet<ValueId>>::new();
+    let mut escaped_out = HashMap::<BlockId, HashSet<ValueId>>::new();
+
+    for block in &function.blocks {
+        live_in.insert(block.id, HashSet::new());
+        live_out.insert(block.id, HashSet::new());
+        call_live_in.insert(block.id, false);
+        call_live_out.insert(block.id, false);
+        escaped_in.insert(block.id, HashSet::new());
+        escaped_out.insert(block.id, HashSet::new());
+    }
+
+    // Compute field liveness and pointer escape information.
+    loop {
+        let mut changed = false;
+
+        for block in function.blocks.iter().rev() {
+            let mut new_live_out = HashSet::new();
+            let mut new_call_live_out = false;
+            let mut new_escaped_out = HashSet::new();
+
+            if let Some(block_successors) = successors.get(&block.id) {
+                for successor in block_successors {
+                    if let Some(fields) = live_in.get(successor) {
+                        new_live_out.extend(fields.iter().copied());
+                    }
+
+                    if call_live_in.get(successor).copied().unwrap_or(false) {
+                        new_call_live_out = true;
+                    }
+
+                    if let Some(escaped) = escaped_in.get(successor) {
+                        new_escaped_out.extend(escaped.iter().copied());
+                    }
+                }
+            }
+
+            let mut live = new_live_out.clone();
+            let mut call_live = new_call_live_out;
+            let mut escaped = new_escaped_out.clone();
+
+            escaped.extend(parameter_values.iter().copied());
+
+            if let Terminator::Return { value: Some(value) } = &block.terminator {
+                escaped.insert(*value);
+            }
+
+            for instruction in block.instructions.iter().rev() {
+                match instruction {
+                    IrInstruction::LoadField {
+                        receiver, field, ..
+                    } => {
+                        live.insert((*receiver, *field));
+                    }
+
+                    IrInstruction::StoreField {
+                        receiver, field, ..
+                    } => {
+                        let key = (*receiver, *field);
+
+                        if escaped.contains(receiver) || call_live {
+                            live.insert(key);
+                        } else {
+                            live.remove(&key);
+                        }
+                    }
+
+                    // Copying a struct reads its entire source storage.
+                    // Conservatively preserve field stores to the source.
+                    IrInstruction::StructCopy {
+                        source, struct_id, ..
+                    } => {
+                        if let Some(struct_def) = structs.iter().find(|s| s.id == *struct_id) {
+                            for field in 0..struct_def.fields.len() {
+                                live.insert((*source, field));
+                            }
+                        }
+                    }
+
+                    // A struct pointer copied into another value may alias
+                    // the same storage. Preserve the source conservatively.
+                    IrInstruction::Copy {
+                        destination,
+                        source,
+                    } => {
+                        if escaped.remove(destination) {
+                            escaped.insert(*source);
+                        }
+
+                        if live.iter().any(|(value, _)| value == destination) {
+                            let aliases: Vec<_> = live
+                                .iter()
+                                .filter(|(value, _)| value == destination)
+                                .map(|(_, field)| *field)
+                                .collect();
+
+                            for field in aliases {
+                                live.insert((*source, field));
+                            }
+                        }
+                    }
+
+                    IrInstruction::Call { .. } => {
+                        call_live = true;
+                    }
+
+                    _ => {}
+                }
+            }
+
+            if live_in.get(&block.id) != Some(&live) {
+                live_in.insert(block.id, live);
+                changed = true;
+            }
+
+            if live_out.get(&block.id) != Some(&new_live_out) {
+                live_out.insert(block.id, new_live_out);
+                changed = true;
+            }
+
+            if call_live_in.get(&block.id) != Some(&call_live) {
+                call_live_in.insert(block.id, call_live);
+                changed = true;
+            }
+
+            if call_live_out.get(&block.id) != Some(&new_call_live_out) {
+                call_live_out.insert(block.id, new_call_live_out);
+                changed = true;
+            }
+
+            if escaped_in.get(&block.id) != Some(&escaped) {
+                escaped_in.insert(block.id, escaped);
+                changed = true;
+            }
+
+            if escaped_out.get(&block.id) != Some(&new_escaped_out) {
+                escaped_out.insert(block.id, new_escaped_out);
+                changed = true;
+            }
+        }
+
+        if !changed {
+            break;
+        }
+    }
+
+    // Remove only stores proven dead. Struct copies and calls are treated
+    // conservatively because they may observe storage indirectly.
+    for block in &mut function.blocks {
+        let mut live = live_out.get(&block.id).cloned().unwrap_or_default();
+        let mut call_live = call_live_out.get(&block.id).copied().unwrap_or(false);
+        let mut escaped = escaped_out.get(&block.id).cloned().unwrap_or_default();
+
+        escaped.extend(parameter_values.iter().copied());
+
+        if let Terminator::Return { value: Some(value) } = &block.terminator {
+            escaped.insert(*value);
+        }
+
+        let mut remove = HashSet::<usize>::new();
+
+        for (index, instruction) in block.instructions.iter().enumerate().rev() {
+            match instruction {
+                IrInstruction::LoadField {
+                    receiver, field, ..
+                } => {
+                    live.insert((*receiver, *field));
+                }
+
+                IrInstruction::StoreField {
+                    receiver, field, ..
+                } => {
+                    let key = (*receiver, *field);
+
+                    if escaped.contains(receiver) || call_live {
+                        live.insert(key);
+                    } else if !live.contains(&key) {
+                        remove.insert(index);
+                    } else {
+                        live.remove(&key);
+                    }
+                }
+
+                IrInstruction::StructCopy {
+                    source, struct_id, ..
+                } => {
+                    if let Some(struct_def) = structs.iter().find(|s| s.id == *struct_id) {
+                        for field in 0..struct_def.fields.len() {
+                            live.insert((*source, field));
+                        }
+                    }
+                }
+
+                IrInstruction::Copy {
+                    destination,
+                    source,
+                } => {
+                    if escaped.remove(destination) {
+                        escaped.insert(*source);
+                    }
+
+                    let aliases: Vec<_> = live
+                        .iter()
+                        .filter(|(value, _)| value == destination)
+                        .map(|(_, field)| *field)
+                        .collect();
+
+                    for field in aliases {
+                        live.insert((*source, field));
+                    }
+                }
+
+                IrInstruction::Call { .. } => {
+                    call_live = true;
+                }
+
+                _ => {}
+            }
+        }
+
+        let mut index = 0;
+        block.instructions.retain(|_| {
+            let keep = !remove.contains(&index);
+            index += 1;
+            keep
+        });
+    }
 
     Ok(())
 }
@@ -2448,262 +2775,6 @@ fn forward_field_stores_function(function: &mut IrFunction) -> Result<(), Vec<Co
     Ok(())
 }
 
-pub fn eliminate_dead_field_stores(program: &mut IrProgram) -> Result<(), Vec<CompilerError>> {
-    let mut errors = Vec::new();
-
-    for function in &mut program.functions {
-        if let Err(error) = eliminate_dead_field_stores_function(function) {
-            errors.extend(error);
-        }
-    }
-
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(errors)
-    }
-}
-
-fn eliminate_dead_field_stores_function(
-    function: &mut IrFunction,
-) -> Result<(), Vec<CompilerError>> {
-    type FieldKey = (ValueId, usize);
-
-    let mut successors = HashMap::<BlockId, Vec<BlockId>>::new();
-
-    let mut parameter_values = HashSet::<ValueId>::new();
-
-    for block in &function.blocks {
-        for instruction in &block.instructions {
-            if let IrInstruction::Parameter { destination, local } = instruction {
-                if function.parameters.iter().any(|parameter| {
-                    parameter.id == *local && matches!(parameter.ty, IrType::Struct(_))
-                }) {
-                    parameter_values.insert(*destination);
-                }
-            }
-        }
-    }
-
-    for block in &function.blocks {
-        let targets = match block.terminator {
-            Terminator::Jump(destination) => vec![destination],
-
-            Terminator::Branch {
-                then_block,
-                else_block,
-                ..
-            } => {
-                if then_block == else_block {
-                    vec![then_block]
-                } else {
-                    vec![then_block, else_block]
-                }
-            }
-
-            Terminator::Return { .. } | Terminator::Unreachable => Vec::new(),
-        };
-
-        successors.insert(block.id, targets);
-    }
-
-    let mut live_in = HashMap::<BlockId, HashSet<FieldKey>>::new();
-    let mut live_out = HashMap::<BlockId, HashSet<FieldKey>>::new();
-
-    let mut call_live_in = HashMap::<BlockId, bool>::new();
-    let mut call_live_out = HashMap::<BlockId, bool>::new();
-
-    // Values whose fields may be observed by the caller because the
-    // object escapes through a Return.
-    let mut escaped_in = HashMap::<BlockId, HashSet<ValueId>>::new();
-    let mut escaped_out = HashMap::<BlockId, HashSet<ValueId>>::new();
-
-    for block in &function.blocks {
-        live_in.insert(block.id, HashSet::new());
-        live_out.insert(block.id, HashSet::new());
-
-        call_live_in.insert(block.id, false);
-        call_live_out.insert(block.id, false);
-
-        escaped_in.insert(block.id, HashSet::new());
-        escaped_out.insert(block.id, HashSet::new());
-    }
-
-    // Backward field liveness and escape analysis.
-    loop {
-        let mut changed = false;
-
-        for block in function.blocks.iter().rev() {
-            let mut new_live_out = HashSet::new();
-            let mut new_call_live_out = false;
-            let mut new_escaped_out = HashSet::new();
-
-            if let Some(block_successors) = successors.get(&block.id) {
-                for successor in block_successors {
-                    if let Some(successor_live_in) = live_in.get(successor) {
-                        new_live_out.extend(successor_live_in);
-                    }
-
-                    if call_live_in.get(successor).copied().unwrap_or(false) {
-                        new_call_live_out = true;
-                    }
-
-                    if let Some(successor_escaped_in) = escaped_in.get(successor) {
-                        new_escaped_out.extend(successor_escaped_in);
-                    }
-                }
-            }
-
-            let mut live = new_live_out.clone();
-            let mut call_live = new_call_live_out;
-            let mut escaped = new_escaped_out.clone();
-            escaped.extend(&parameter_values);
-
-            // A returned object escapes the function. Its fields may be
-            // observed by the caller, so stores to it must be preserved.
-            if let Terminator::Return { value: Some(value) } = block.terminator {
-                escaped.insert(value);
-            }
-
-            for instruction in block.instructions.iter().rev() {
-                match instruction {
-                    IrInstruction::LoadField {
-                        receiver, field, ..
-                    } => {
-                        live.insert((*receiver, *field));
-                    }
-
-                    IrInstruction::StoreField {
-                        receiver, field, ..
-                    } => {
-                        let key = (*receiver, *field);
-
-                        if escaped.contains(receiver) {
-                            live.insert(key);
-                        } else if !call_live {
-                            live.remove(&key);
-                        }
-                    }
-
-                    // Preserve the fact that the destination aliases the
-                    // source when the destination escapes.
-                    IrInstruction::Copy {
-                        destination,
-                        source,
-                    } => {
-                        if escaped.remove(destination) {
-                            escaped.insert(*source);
-                        }
-                    }
-
-                    IrInstruction::Call { .. } => {
-                        call_live = true;
-                    }
-
-                    _ => {}
-                }
-            }
-
-            if live_in.get(&block.id) != Some(&live) {
-                live_in.insert(block.id, live);
-                changed = true;
-            }
-
-            if live_out.get(&block.id) != Some(&new_live_out) {
-                live_out.insert(block.id, new_live_out);
-                changed = true;
-            }
-
-            if call_live_in.get(&block.id) != Some(&call_live) {
-                call_live_in.insert(block.id, call_live);
-                changed = true;
-            }
-
-            if call_live_out.get(&block.id) != Some(&new_call_live_out) {
-                call_live_out.insert(block.id, new_call_live_out);
-                changed = true;
-            }
-
-            if escaped_in.get(&block.id) != Some(&escaped) {
-                escaped_in.insert(block.id, escaped);
-                changed = true;
-            }
-
-            if escaped_out.get(&block.id) != Some(&new_escaped_out) {
-                escaped_out.insert(block.id, new_escaped_out);
-                changed = true;
-            }
-        }
-
-        if !changed {
-            break;
-        }
-    }
-
-    // Remove stores whose field value is never observed.
-    for block in &mut function.blocks {
-        let mut live = live_out.get(&block.id).cloned().unwrap_or_default();
-        let mut call_live = call_live_out.get(&block.id).copied().unwrap_or(false);
-        let mut escaped = escaped_out.get(&block.id).cloned().unwrap_or_default();
-        escaped.extend(&parameter_values);
-
-        if let Terminator::Return { value: Some(value) } = block.terminator {
-            escaped.insert(value);
-        }
-
-        let mut remove = HashSet::<usize>::new();
-
-        for (index, instruction) in block.instructions.iter().enumerate().rev() {
-            match instruction {
-                IrInstruction::LoadField {
-                    receiver, field, ..
-                } => {
-                    live.insert((*receiver, *field));
-                }
-
-                IrInstruction::StoreField {
-                    receiver, field, ..
-                } => {
-                    let key = (*receiver, *field);
-
-                    if escaped.contains(receiver) {
-                        live.insert(key);
-                    } else if !call_live && !live.contains(&key) {
-                        remove.insert(index);
-                    } else if !call_live {
-                        live.remove(&key);
-                    }
-                }
-
-                IrInstruction::Copy {
-                    destination,
-                    source,
-                } => {
-                    if escaped.remove(destination) {
-                        escaped.insert(*source);
-                    }
-                }
-
-                IrInstruction::Call { .. } => {
-                    call_live = true;
-                }
-
-                _ => {}
-            }
-        }
-
-        let mut index = 0;
-
-        block.instructions.retain(|_| {
-            let keep = !remove.contains(&index);
-            index += 1;
-            keep
-        });
-    }
-
-    Ok(())
-}
-
 pub fn eliminate_dead_stack_allocs(program: &mut IrProgram) -> Result<(), Vec<CompilerError>> {
     for function in &mut program.functions {
         let mut used = HashSet::<ValueId>::new();
@@ -2770,8 +2841,13 @@ pub fn eliminate_dead_stack_allocs(program: &mut IrProgram) -> Result<(), Vec<Co
                     | IrInstruction::ConstString { .. }
                     | IrInstruction::ConstBool { .. }
                     | IrInstruction::LoadLocal { .. }
-                    | IrInstruction::AllocStruct { .. }
                     | IrInstruction::StackAllocStruct { .. } => {}
+                    IrInstruction::StructCall {
+                        destination,
+                        function,
+                        arguments,
+                        struct_id,
+                    } => todo!(),
                 }
             }
         }
@@ -2782,109 +2858,6 @@ pub fn eliminate_dead_stack_allocs(program: &mut IrProgram) -> Result<(), Vec<Co
 
                 _ => true,
             });
-        }
-    }
-
-    Ok(())
-}
-
-pub fn promote_non_escaping_allocs(program: &mut IrProgram) -> Result<(), Vec<CompilerError>> {
-    for function in &mut program.functions {
-        // Values that may escape this function.
-        let mut escaping = HashSet::<ValueId>::new();
-
-        // Copies and Phi nodes can preserve object identity.
-        // Treat connected values as aliases.
-        let mut aliases = HashMap::<ValueId, HashSet<ValueId>>::new();
-
-        for block in &function.blocks {
-            for instruction in &block.instructions {
-                match instruction {
-                    IrInstruction::Copy {
-                        destination,
-                        source,
-                    } => {
-                        aliases.entry(*destination).or_default().insert(*source);
-                        aliases.entry(*source).or_default().insert(*destination);
-                    }
-
-                    IrInstruction::Phi {
-                        destination,
-                        sources,
-                        ..
-                    } => {
-                        for (_, source) in sources {
-                            aliases.entry(*destination).or_default().insert(*source);
-                            aliases.entry(*source).or_default().insert(*destination);
-                        }
-                    }
-
-                    // These uses may make an object observable outside
-                    // the current function.
-                    IrInstruction::StoreLocal { value, .. }
-                    | IrInstruction::StoreField { value, .. } => {
-                        escaping.insert(*value);
-                    }
-
-                    IrInstruction::Call { arguments, .. } => {
-                        escaping.extend(arguments.iter().copied());
-                    }
-
-                    IrInstruction::Binary { left, right, .. } => {
-                        // Struct values are not expected here, but keep
-                        // unknown value uses conservative.
-                        escaping.insert(*left);
-                        escaping.insert(*right);
-                    }
-
-                    _ => {}
-                }
-            }
-
-            match &block.terminator {
-                Terminator::Return { value: Some(value) } => {
-                    escaping.insert(*value);
-                }
-
-                Terminator::Branch { condition, .. } => {
-                    escaping.insert(*condition);
-                }
-
-                Terminator::Jump(_)
-                | Terminator::Return { value: None }
-                | Terminator::Unreachable => {}
-            }
-        }
-
-        // If one alias escapes, every value aliasing that object escapes.
-        let mut worklist: Vec<ValueId> = escaping.iter().copied().collect();
-
-        while let Some(value) = worklist.pop() {
-            if let Some(value_aliases) = aliases.get(&value) {
-                for alias in value_aliases {
-                    if escaping.insert(*alias) {
-                        worklist.push(*alias);
-                    }
-                }
-            }
-        }
-
-        // Stack-promote only allocations proven not to escape.
-        for block in &mut function.blocks {
-            for instruction in &mut block.instructions {
-                if let IrInstruction::AllocStruct {
-                    destination,
-                    struct_id,
-                } = instruction
-                {
-                    if !escaping.contains(destination) {
-                        *instruction = IrInstruction::StackAllocStruct {
-                            destination: *destination,
-                            struct_id: *struct_id,
-                        };
-                    }
-                }
-            }
         }
     }
 
@@ -2924,165 +2897,6 @@ mod tests {
                 }],
             }],
         }
-    }
-
-    #[test]
-    fn promotes_non_escaping_allocation() {
-        let mut program = allocation_program(
-            vec![
-                IrInstruction::AllocStruct {
-                    destination: ValueId(0),
-                    struct_id: StructId(0),
-                },
-                IrInstruction::ConstInt {
-                    destination: ValueId(1),
-                    value: 42,
-                },
-                IrInstruction::StoreField {
-                    receiver: ValueId(0),
-                    field: 0,
-                    value: ValueId(1),
-                },
-            ],
-            Some(ValueId(1)),
-        );
-
-        promote_non_escaping_allocs(&mut program).expect("optimization should succeed");
-
-        assert!(matches!(
-            &program.functions[0].blocks[0].instructions[0],
-            IrInstruction::StackAllocStruct {
-                destination: ValueId(0),
-                struct_id: StructId(0),
-            }
-        ));
-    }
-
-    #[test]
-    fn preserves_allocation_returned_from_function() {
-        let mut program = allocation_program(
-            vec![IrInstruction::AllocStruct {
-                destination: ValueId(0),
-                struct_id: StructId(0),
-            }],
-            Some(ValueId(0)),
-        );
-
-        promote_non_escaping_allocs(&mut program).expect("optimization should succeed");
-
-        assert!(matches!(
-            &program.functions[0].blocks[0].instructions[0],
-            IrInstruction::AllocStruct {
-                destination: ValueId(0),
-                struct_id: StructId(0),
-            }
-        ));
-    }
-
-    #[test]
-    fn preserves_allocation_passed_to_call() {
-        let mut program = allocation_program(
-            vec![
-                IrInstruction::AllocStruct {
-                    destination: ValueId(0),
-                    struct_id: StructId(0),
-                },
-                IrInstruction::Call {
-                    destination: None,
-                    function: FunctionId(0),
-                    arguments: vec![ValueId(0)],
-                },
-            ],
-            None,
-        );
-
-        promote_non_escaping_allocs(&mut program).expect("optimization should succeed");
-
-        assert!(matches!(
-            &program.functions[0].blocks[0].instructions[0],
-            IrInstruction::AllocStruct { .. }
-        ));
-    }
-
-    #[test]
-    fn preserves_allocation_when_copy_escapes() {
-        let mut program = allocation_program(
-            vec![
-                IrInstruction::AllocStruct {
-                    destination: ValueId(0),
-                    struct_id: StructId(0),
-                },
-                IrInstruction::Copy {
-                    destination: ValueId(1),
-                    source: ValueId(0),
-                },
-            ],
-            Some(ValueId(1)),
-        );
-
-        promote_non_escaping_allocs(&mut program).expect("optimization should succeed");
-
-        assert!(matches!(
-            &program.functions[0].blocks[0].instructions[0],
-            IrInstruction::AllocStruct { .. }
-        ));
-    }
-
-    #[test]
-    fn promotes_allocation_used_as_struct_copy_source() {
-        let mut program = allocation_program(
-            vec![
-                IrInstruction::AllocStruct {
-                    destination: ValueId(0),
-                    struct_id: StructId(0),
-                },
-                IrInstruction::StructCopy {
-                    destination: ValueId(1),
-                    source: ValueId(0),
-                    struct_id: StructId(0),
-                },
-            ],
-            Some(ValueId(1)),
-        );
-
-        promote_non_escaping_allocs(&mut program).expect("optimization should succeed");
-
-        assert!(matches!(
-            &program.functions[0].blocks[0].instructions[0],
-            IrInstruction::StackAllocStruct { .. }
-        ));
-    }
-
-    #[test]
-    fn preserves_allocation_stored_as_field_value() {
-        let mut program = allocation_program(
-            vec![
-                IrInstruction::AllocStruct {
-                    destination: ValueId(0),
-                    struct_id: StructId(0),
-                },
-                IrInstruction::AllocStruct {
-                    destination: ValueId(1),
-                    struct_id: StructId(0),
-                },
-                IrInstruction::StoreField {
-                    receiver: ValueId(1),
-                    field: 0,
-                    value: ValueId(0),
-                },
-            ],
-            Some(ValueId(1)),
-        );
-
-        promote_non_escaping_allocs(&mut program).expect("optimization should succeed");
-
-        assert!(matches!(
-            &program.functions[0].blocks[0].instructions[0],
-            IrInstruction::AllocStruct {
-                destination: ValueId(0),
-                ..
-            }
-        ));
     }
 
     #[test]
@@ -3232,46 +3046,6 @@ mod tests {
     }
 
     #[test]
-    fn does_not_eliminate_alloc_struct() {
-        let mut program = IrProgram {
-            structs: vec![IrStruct {
-                id: StructId(0),
-                name: "Test".to_string(),
-                base: None,
-                fields: Vec::new(),
-            }],
-            functions: vec![IrFunction {
-                id: Some(FunctionId(0)),
-                name: "test".to_string(),
-                owner: None,
-                parameters: Vec::new(),
-                locals: Vec::new(),
-                return_type: IrType::Void,
-                entry: BlockId(0),
-                blocks: vec![BasicBlock {
-                    id: BlockId(0),
-                    instructions: vec![IrInstruction::AllocStruct {
-                        destination: ValueId(0),
-                        struct_id: StructId(0),
-                    }],
-                    terminator: Terminator::Return { value: None },
-                }],
-            }],
-        };
-
-        eliminate_dead_stack_allocs(&mut program)
-            .expect("dead stack allocation elimination should succeed");
-
-        assert!(matches!(
-            &program.functions[0].blocks[0].instructions[0],
-            IrInstruction::AllocStruct {
-                destination: ValueId(0),
-                struct_id: StructId(0),
-            }
-        ));
-    }
-
-    #[test]
     fn eliminates_dead_field_store() {
         let mut program = IrProgram {
             structs: Vec::new(),
@@ -3286,7 +3060,7 @@ mod tests {
                 blocks: vec![BasicBlock {
                     id: BlockId(0),
                     instructions: vec![
-                        IrInstruction::AllocStruct {
+                        IrInstruction::StackAllocStruct {
                             destination: ValueId(0),
                             struct_id: StructId(0),
                         },
@@ -3331,7 +3105,7 @@ mod tests {
                 blocks: vec![BasicBlock {
                     id: BlockId(0),
                     instructions: vec![
-                        IrInstruction::AllocStruct {
+                        IrInstruction::StackAllocStruct {
                             destination: ValueId(0),
                             struct_id: StructId(0),
                         },
@@ -3408,7 +3182,7 @@ mod tests {
                 blocks: vec![BasicBlock {
                     id: BlockId(0),
                     instructions: vec![
-                        IrInstruction::AllocStruct {
+                        IrInstruction::StackAllocStruct {
                             destination: ValueId(0),
                             struct_id: StructId(0),
                         },
@@ -3465,7 +3239,7 @@ mod tests {
                 blocks: vec![BasicBlock {
                     id: BlockId(0),
                     instructions: vec![
-                        IrInstruction::AllocStruct {
+                        IrInstruction::StackAllocStruct {
                             destination: ValueId(0),
                             struct_id: StructId(0),
                         },
@@ -3519,7 +3293,7 @@ mod tests {
                 blocks: vec![BasicBlock {
                     id: BlockId(0),
                     instructions: vec![
-                        IrInstruction::AllocStruct {
+                        IrInstruction::StackAllocStruct {
                             destination: ValueId(0),
                             struct_id: StructId(0),
                         },
@@ -3582,7 +3356,7 @@ mod tests {
                 blocks: vec![BasicBlock {
                     id: BlockId(0),
                     instructions: vec![
-                        IrInstruction::AllocStruct {
+                        IrInstruction::StackAllocStruct {
                             destination: ValueId(0),
                             struct_id: StructId(0),
                         },
@@ -7043,7 +6817,7 @@ mod tests {
                 blocks: vec![BasicBlock {
                     id: BlockId(0),
                     instructions: vec![
-                        IrInstruction::AllocStruct {
+                        IrInstruction::StackAllocStruct {
                             destination: ValueId(0),
                             struct_id: StructId(0),
                         },
@@ -7093,7 +6867,7 @@ mod tests {
                 blocks: vec![BasicBlock {
                     id: BlockId(0),
                     instructions: vec![
-                        IrInstruction::AllocStruct {
+                        IrInstruction::StackAllocStruct {
                             destination: ValueId(0),
                             struct_id: StructId(0),
                         },
@@ -7153,7 +6927,7 @@ mod tests {
                 blocks: vec![BasicBlock {
                     id: BlockId(0),
                     instructions: vec![
-                        IrInstruction::AllocStruct {
+                        IrInstruction::StackAllocStruct {
                             destination: ValueId(0),
                             struct_id: StructId(0),
                         },
@@ -7205,7 +6979,7 @@ mod tests {
                     BasicBlock {
                         id: BlockId(0),
                         instructions: vec![
-                            IrInstruction::AllocStruct {
+                            IrInstruction::StackAllocStruct {
                                 destination: ValueId(0),
                                 struct_id: StructId(0),
                             },
@@ -7283,7 +7057,7 @@ mod tests {
                     BasicBlock {
                         id: BlockId(0),
                         instructions: vec![
-                            IrInstruction::AllocStruct {
+                            IrInstruction::StackAllocStruct {
                                 destination: ValueId(0),
                                 struct_id: StructId(0),
                             },
@@ -7357,10 +7131,6 @@ mod tests {
                     BasicBlock {
                         id: BlockId(0),
                         instructions: vec![
-                            IrInstruction::AllocStruct {
-                                destination: ValueId(0),
-                                struct_id: StructId(0),
-                            },
                             IrInstruction::LoadField {
                                 destination: ValueId(1),
                                 receiver: ValueId(0),

@@ -183,8 +183,7 @@ impl<'a> Validator<'a> {
                 .get(source)
                 .map(|definition| definition.ty.clone()),
 
-            IrInstruction::AllocStruct { struct_id, .. }
-            | IrInstruction::StructCopy { struct_id, .. } => Some(IrType::Struct(*struct_id)),
+            IrInstruction::StructCopy { struct_id, .. } => Some(IrType::Struct(*struct_id)),
 
             IrInstruction::LoadField {
                 receiver, field, ..
@@ -253,9 +252,10 @@ impl<'a> Validator<'a> {
 
             IrInstruction::StoreLocal { .. } | IrInstruction::StoreField { .. } => None,
             IrInstruction::StackAllocStruct {
-                destination,
                 struct_id,
+                ..
             } => Some(IrType::Struct(*struct_id)),
+            IrInstruction::StructCall { destination, function, arguments, struct_id } => todo!(),
         }
     }
 
@@ -302,8 +302,7 @@ impl<'a> Validator<'a> {
             | IrInstruction::ConstBool { .. }
             | IrInstruction::LoadLocal { .. }
             | IrInstruction::Parameter { .. }
-            | IrInstruction::Copy { .. }
-            | IrInstruction::AllocStruct { .. } => {}
+            | IrInstruction::Copy { .. } => {}
 
             IrInstruction::StoreLocal { local, value } => {
                 self.require_value(
@@ -602,6 +601,7 @@ impl<'a> Validator<'a> {
                 destination,
                 struct_id,
             } => {}
+            IrInstruction::StructCall { destination, function, arguments, struct_id } => todo!(),
         }
     }
 
@@ -1169,9 +1169,9 @@ fn instruction_destination(instruction: &IrInstruction) -> Option<ValueId> {
 
         IrInstruction::Call { destination, .. } => *destination,
         IrInstruction::LoadField { destination, .. } => Some(*destination),
-        IrInstruction::AllocStruct { destination, .. } => Some(*destination),
         IrInstruction::StoreField { .. } => None,
         IrInstruction::StackAllocStruct { destination, .. } => Some(*destination),
+        IrInstruction::StructCall { destination, function, arguments, struct_id } => todo!(),
     }
 }
 
@@ -1793,7 +1793,7 @@ mod tests {
             vec![block(
                 0,
                 vec![
-                    IrInstruction::AllocStruct {
+                    IrInstruction::StackAllocStruct {
                         destination: ValueId(0),
                         struct_id: StructId(1),
                     },
@@ -2165,7 +2165,7 @@ mod tests {
             vec![block(
                 0,
                 vec![
-                    IrInstruction::AllocStruct {
+                    IrInstruction::StackAllocStruct {
                         destination: ValueId(0),
                         struct_id: StructId(0),
                     },
@@ -2247,7 +2247,7 @@ mod tests {
             vec![block(
                 0,
                 vec![
-                    IrInstruction::AllocStruct {
+                    IrInstruction::StackAllocStruct {
                         destination: ValueId(0),
                         struct_id: StructId(0),
                     },
@@ -2290,7 +2290,7 @@ mod tests {
             vec![block(
                 0,
                 vec![
-                    IrInstruction::AllocStruct {
+                    IrInstruction::StackAllocStruct {
                         destination: ValueId(0),
                         struct_id: StructId(0),
                     },
@@ -2346,7 +2346,7 @@ mod tests {
             vec![block(
                 0,
                 vec![
-                    IrInstruction::AllocStruct {
+                    IrInstruction::StackAllocStruct {
                         destination: ValueId(0),
                         struct_id: StructId(0),
                     },

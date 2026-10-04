@@ -361,6 +361,49 @@ impl<'a> FunctionBuilder<'a> {
                 }
             }
 
+            HirStmt::AssignField {
+                receiver,
+                struct_id,
+                field,
+                value,
+            } => {
+                let Some(receiver_value) = self.lower_expr(receiver) else {
+                    return;
+                };
+
+                let Some(value) = self.lower_expr(value) else {
+                    return;
+                };
+
+                // println!(
+                //     "receiver: {} ; receiver_value: {:?} ; value: {:?}",
+                //     receiver, receiver_value, value
+                // );
+
+                let receiver_struct = match receiver.ty {
+                    Type::Struct(id) => id,
+                    _ => return,
+                };
+
+                let physical_field = match physical_field_index(
+                    &self.program.structs,
+                    receiver_struct,
+                    *struct_id,
+                    *field,
+                ) {
+                    Ok(index) => index,
+                    Err(error) => {
+                        panic!("physical_field_index failed: {:?}", error);
+                    }
+                };
+
+                self.emit(IrInstruction::StoreField {
+                    receiver: receiver_value,
+                    field: physical_field,
+                    value,
+                });
+            }
+
             HirStmt::Return { value } => {
                 let value = value.as_ref().and_then(|expr| self.lower_expr(expr));
 
@@ -393,45 +436,6 @@ impl<'a> FunctionBuilder<'a> {
                 if let Some(targets) = self.loop_targets.last() {
                     self.terminate(Terminator::Jump(targets.condition));
                 }
-            }
-            HirStmt::AssignField {
-                receiver,
-                struct_id,
-                field,
-                value,
-            } => {
-                let receiver_struct = match receiver.ty {
-                    Type::Struct(id) => id,
-                    _ => {
-                        return;
-                    }
-                };
-
-                let Some(receiver_value) = self.lower_expr(receiver) else {
-                    return;
-                };
-
-                let Some(value) = self.lower_expr(value) else {
-                    return;
-                };
-
-                let physical_field = match physical_field_index(
-                    &self.program.structs,
-                    receiver_struct,
-                    *struct_id,
-                    *field,
-                ) {
-                    Ok(index) => index,
-                    Err(_) => {
-                        return;
-                    }
-                };
-
-                self.emit(IrInstruction::StoreField {
-                    receiver: receiver_value,
-                    field: physical_field,
-                    value,
-                });
             }
         }
     }
@@ -677,22 +681,14 @@ impl<'a> FunctionBuilder<'a> {
                 struct_id,
                 constructor,
                 arguments,
-                allocation,
+                ..
             } => {
                 let destination = self.new_value();
 
-                let instruction = match allocation {
-                    HirAllocationKind::Heap => IrInstruction::AllocStruct {
-                        destination,
-                        struct_id: *struct_id,
-                    },
-                    HirAllocationKind::Stack => IrInstruction::StackAllocStruct {
-                        destination,
-                        struct_id: *struct_id,
-                    },
-                };
-
-                self.emit(instruction);
+                self.emit(IrInstruction::StackAllocStruct {
+                    destination,
+                    struct_id: *struct_id,
+                });
 
                 if let Some(constructor_id) = constructor {
                     let function = match self.constructor_function_id(*constructor_id) {

@@ -13,8 +13,9 @@ pub fn compile(source: &str) -> Result<ir::IrProgram, Vec<CompilerError>> {
     let mut hir = semantic::analyze(ast, source_file)?;
 
     semantic::escape::analyze(&mut hir);
-
+    // println!("{:#?}", hir);
     let mut ir = ir::lower::lower_to_ir(hir)?;
+    // println!("IR immediately after lowering:\n{:#?}", ir);
 
     // eprintln!("lower_to_ir: {:?}", ir);
 
@@ -59,8 +60,18 @@ pub fn compile(source: &str) -> Result<ir::IrProgram, Vec<CompilerError>> {
     ir::cleanup::eliminate_redundant_loads(&mut ir)?;
     ir::cleanup::forward_field_stores(&mut ir)?;
     ir::cleanup::eliminate_redundant_field_loads(&mut ir)?;
+    println!(
+        "IR immediately after eliminate_redundant_field_loads:\n{:#?}",
+        ir
+    );
+
     ir::cleanup::eliminate_dead_stores(&mut ir)?;
+    println!("IR immediately after eliminate_dead_stores:\n{:#?}", ir);
     ir::cleanup::eliminate_dead_field_stores(&mut ir)?;
+    println!(
+        "IR immediately after eliminate_dead_field_stores:\n{:#?}",
+        ir
+    );
 
     // Global value numbering / common-subexpression elimination.
     ir::cleanup::gvn_cse(&mut ir)?;
@@ -72,9 +83,6 @@ pub fn compile(source: &str) -> Result<ir::IrProgram, Vec<CompilerError>> {
     // Remove unused pure instructions.
     ir::cleanup::eliminate_dead_code(&mut ir)?;
     ir::cleanup::eliminate_dead_stack_allocs(&mut ir)?;
-
-    // Promote allocations whose references do not escape.
-    ir::cleanup::promote_non_escaping_allocs(&mut ir)?;
 
     // Validate the final optimized IR.
     ir::validate(&ir)?;

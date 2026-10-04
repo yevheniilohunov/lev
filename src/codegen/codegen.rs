@@ -918,46 +918,7 @@ impl<'a> FunctionCodegen<'a> {
                     }
                 }
             }
-            IrInstruction::AllocStruct {
-                destination,
-                struct_id,
-            } => {
-                let structure = self
-                    .program
-                    .structs
-                    .iter()
-                    .find(|structure| structure.id == *struct_id)
-                    .ok_or_else(|| {
-                        vec![CompilerError::internal(format!(
-                            "unknown struct id {:?}",
-                            struct_id
-                        ))]
-                    })?;
 
-                let size = (structure.fields.len() as i32) * 8;
-
-                match self.target {
-                    CodegenTarget::X86_64 | CodegenTarget::X86_64MacOS => {
-                        writeln!(self.output, "    mov rdi, {}", size)
-                            .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
-
-                        writeln!(self.output, "    call {}", self.target.malloc_symbol())
-                            .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
-
-                        self.emit_store(*destination, "rax")?;
-                    }
-
-                    CodegenTarget::Aarch64MacOS => {
-                        writeln!(self.output, "    mov x0, #{}", size)
-                            .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
-
-                        writeln!(self.output, "    bl {}", self.target.malloc_symbol())
-                            .map_err(|e| vec![CompilerError::internal(e.to_string())])?;
-
-                        self.emit_store(*destination, "x0")?;
-                    }
-                }
-            }
             IrInstruction::StoreField {
                 receiver,
                 field,
@@ -1127,6 +1088,12 @@ impl<'a> FunctionCodegen<'a> {
                     }
                 }
             }
+            IrInstruction::StructCall {
+                destination,
+                function,
+                arguments,
+                struct_id,
+            } => todo!(),
         }
 
         Ok(())
@@ -1409,11 +1376,11 @@ fn instruction_destination(instruction: &IrInstruction) -> Option<ValueId> {
 
         IrInstruction::Call { destination, .. } => *destination,
 
+        IrInstruction::StructCall { destination, .. } => Some(*destination),
+
         IrInstruction::Phi { destination, .. } => Some(*destination),
 
         IrInstruction::LoadField { destination, .. } => Some(*destination),
-
-        IrInstruction::AllocStruct { destination, .. } => Some(*destination),
 
         IrInstruction::StructCopy { destination, .. } => Some(*destination),
 

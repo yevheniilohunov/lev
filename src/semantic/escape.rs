@@ -1,4 +1,4 @@
-use super::hir::{HirAllocationKind, HirBlock, HirExpr, HirExprKind, HirProgram, HirStmt};
+use super::hir::{HirBlock, HirExpr, HirExprKind, HirProgram, HirStmt};
 use super::symbols::LocalId;
 
 pub fn analyze(program: &mut HirProgram) {
@@ -243,16 +243,7 @@ enum AllocationContext {
 
 fn mark_value(expr: &mut HirExpr, context: AllocationContext, escaping_locals: &[LocalId]) {
     match &mut expr.kind {
-        HirExprKind::StructInit {
-            allocation,
-            arguments,
-            ..
-        } => {
-            *allocation = match context {
-                AllocationContext::Local => HirAllocationKind::Stack,
-                AllocationContext::Escaping => HirAllocationKind::Heap,
-            };
-
+        HirExprKind::StructInit { arguments, .. } => {
             for argument in arguments {
                 mark_value(argument, AllocationContext::Local, escaping_locals);
             }

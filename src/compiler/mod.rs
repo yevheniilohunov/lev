@@ -60,18 +60,18 @@ pub fn compile(source: &str) -> Result<ir::IrProgram, Vec<CompilerError>> {
     ir::cleanup::eliminate_redundant_loads(&mut ir)?;
     ir::cleanup::forward_field_stores(&mut ir)?;
     ir::cleanup::eliminate_redundant_field_loads(&mut ir)?;
-    println!(
-        "IR immediately after eliminate_redundant_field_loads:\n{:#?}",
-        ir
-    );
+    // println!(
+    //     "IR immediately after eliminate_redundant_field_loads:\n{:#?}",
+    //     ir
+    // );
 
     ir::cleanup::eliminate_dead_stores(&mut ir)?;
-    println!("IR immediately after eliminate_dead_stores:\n{:#?}", ir);
+    // println!("IR immediately after eliminate_dead_stores:\n{:#?}", ir);
     ir::cleanup::eliminate_dead_field_stores(&mut ir)?;
-    println!(
-        "IR immediately after eliminate_dead_field_stores:\n{:#?}",
-        ir
-    );
+    // println!(
+    //     "IR immediately after eliminate_dead_field_stores:\n{:#?}",
+    //     ir
+    // );
 
     // Global value numbering / common-subexpression elimination.
     ir::cleanup::gvn_cse(&mut ir)?;

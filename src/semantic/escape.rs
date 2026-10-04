@@ -114,11 +114,17 @@ fn collect_escaping_expr(expr: &HirExpr, escaping: &mut Vec<LocalId>) {
 fn collect_escape_aliases(block: &HirBlock, escaping: &mut Vec<LocalId>) {
     for statement in &block.statements {
         match statement {
-            HirStmt::Assign { local, value }
-            | HirStmt::Let { local, value }
-            | HirStmt::Const { local, value } => {
+            HirStmt::Assign { local, value } | HirStmt::Const { local, value } => {
                 if escaping.contains(local) {
                     collect_value_locals(value, escaping);
+                }
+            }
+
+            HirStmt::Let { local, value } => {
+                if let Some(value) = value {
+                    if escaping.contains(local) {
+                        collect_value_locals(value, escaping);
+                    }
                 }
             }
 
@@ -181,9 +187,7 @@ fn collect_value_locals(expr: &HirExpr, escaping: &mut Vec<LocalId>) {
 fn mark_allocations(block: &mut HirBlock, escaping_locals: &[LocalId]) {
     for statement in &mut block.statements {
         match statement {
-            HirStmt::Assign { local, value }
-            | HirStmt::Let { local, value }
-            | HirStmt::Const { local, value } => {
+            HirStmt::Assign { local, value } | HirStmt::Const { local, value } => {
                 mark_value(
                     value,
                     if escaping_locals.contains(local) {
@@ -193,6 +197,20 @@ fn mark_allocations(block: &mut HirBlock, escaping_locals: &[LocalId]) {
                     },
                     escaping_locals,
                 );
+            }
+
+            HirStmt::Let { local, value } => {
+                if let Some(value) = value {
+                    mark_value(
+                        value,
+                        if escaping_locals.contains(local) {
+                            AllocationContext::Escaping
+                        } else {
+                            AllocationContext::Local
+                        },
+                        escaping_locals,
+                    );
+                }
             }
 
             HirStmt::AssignField {

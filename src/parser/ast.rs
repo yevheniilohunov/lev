@@ -63,8 +63,8 @@ pub enum Stmt {
 
     Let {
         name: String,
-        ty: TypeName,
-        value: Expr,
+        ty: Option<TypeName>,
+        value: Option<Expr>,
         span: Span,
     },
 

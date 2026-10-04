@@ -335,11 +335,13 @@ impl<'a> FunctionBuilder<'a> {
     fn lower_stmt(&mut self, statement: &HirStmt) {
         match statement {
             HirStmt::Let { local, value } => {
-                if let Some(value) = self.lower_value_for_local(value) {
-                    self.emit(IrInstruction::StoreLocal {
-                        local: *local,
-                        value,
-                    });
+                if let Some(value) = value {
+                    if let Some(value) = self.lower_value_for_local(value) {
+                        self.emit(IrInstruction::StoreLocal {
+                            local: *local,
+                            value,
+                        });
+                    }
                 }
             }
 

@@ -885,31 +885,58 @@ impl<'a> Analyzer<'a> {
                 value,
                 span,
             } => {
-                let declared_type = match self.resolve_type(ty, *span) {
-                    Some(ty) => ty,
+                let value = match value {
+                    Some(value) => Some(self.analyze_expr(value, scope)),
+                    None => None,
+                };
 
-                    None => {
-                        return Err(vec![
-                            self.error_at("cannot determine type of variable declaration", *span)
-                        ]);
+                let declared_type = match ty {
+                    Some(ty) => match self.resolve_type(ty, *span) {
+                        Some(ty) => Some(ty),
+                        None => {
+                            return Err(vec![self.error_at(
+                                "cannot determine type of variable declaration",
+                                *span,
+                            )]);
+                        }
+                    },
+
+                    None => None,
+                };
+
+                let local_type = match (declared_type, &value) {
+                    // let p: Point = expr;
+                    (Some(declared_type), Some(value)) => {
+                        if value.ty != declared_type {
+                            return Err(vec![self.error_at(
+                                format!(
+                        "cannot initialize variable '{}' of type {:?} with value of type {:?}",
+                        name, declared_type, value.ty
+                    ),
+                                *span,
+                            )]);
+                        }
+
+                        declared_type
+                    }
+
+                    // let p: Point;
+                    (Some(declared_type), None) => declared_type,
+
+                    // let p = expr;
+                    (None, Some(value)) => value.ty.clone(),
+
+                    // let p;
+                    (None, None) => {
+                        return Err(vec![self.error_at(
+                            "variable declaration requires a type or initializer",
+                            *span,
+                        )]);
                     }
                 };
 
-                let value = self.analyze_expr(value, scope);
-
-                if value.ty != declared_type {
-                    return Err(vec![self.error_at(
-                        format!(
-                            "cannot initialize variable '{}' of type {:?} with value of type {:?}",
-                            name, declared_type, value.ty
-                        ),
-                        *span,
-                    )]);
-                }
-
-                let local = match scope.declare(name.clone(), declared_type, true) {
+                let local = match scope.declare(name.clone(), local_type, true) {
                     Ok(local) => local,
-
                     Err(error) => {
                         return Err(vec![self.error_at(error, *span)]);
                     }
@@ -1766,8 +1793,8 @@ mod tests {
             vec![
                 Stmt::Let {
                     name: "person".to_string(),
-                    ty: identifier_type("Person"),
-                    value: new_expr("Person", Vec::new()),
+                    ty: Some(identifier_type("Person")),
+                    value: Some(new_expr("Person", Vec::new())),
                     span: span(),
                 },
                 Stmt::Return {
@@ -1827,8 +1854,8 @@ mod tests {
             vec![
                 Stmt::Let {
                     name: "person".to_string(),
-                    ty: identifier_type("Person"),
-                    value: new_expr("Person", Vec::new()),
+                    ty: Some(identifier_type("Person")),
+                    value: Some(new_expr("Person", Vec::new())),
                     span: span(),
                 },
                 Stmt::Assign {
@@ -1883,8 +1910,8 @@ mod tests {
             vec![
                 Stmt::Let {
                     name: "person".to_string(),
-                    ty: identifier_type("Person"),
-                    value: new_expr("Person", Vec::new()),
+                    ty: Some(identifier_type("Person")),
+                    value: Some(new_expr("Person", Vec::new())),
                     span: span(),
                 },
                 Stmt::Assign {
@@ -1927,8 +1954,8 @@ mod tests {
             vec![
                 Stmt::Let {
                     name: "person".to_string(),
-                    ty: identifier_type("Person"),
-                    value: new_expr("Person", Vec::new()),
+                    ty: Some(identifier_type("Person")),
+                    value: Some(new_expr("Person", Vec::new())),
                     span: span(),
                 },
                 Stmt::Assign {
@@ -1979,8 +2006,8 @@ mod tests {
             vec![
                 Stmt::Let {
                     name: "employee".to_string(),
-                    ty: identifier_type("Employee"),
-                    value: new_expr("Employee", Vec::new()),
+                    ty: Some(identifier_type("Employee")),
+                    value: Some(new_expr("Employee", Vec::new())),
                     span: span(),
                 },
                 Stmt::Return {

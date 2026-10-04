@@ -76,7 +76,7 @@ pub enum HirStmt {
 
     Let {
         local: LocalId,
-        value: HirExpr,
+        value: Option<HirExpr>,
     },
 
     Const {

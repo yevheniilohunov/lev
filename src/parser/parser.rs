@@ -343,13 +343,26 @@ impl<'a> Parser<'a> {
 
         let name = self.expect_identifier("expected variable name")?;
 
-        self.expect(&TokenKind::Colon, "expected ':' after variable name")?;
+        let ty = if self.check(&TokenKind::Colon) {
+            self.advance();
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
 
-        let ty = self.parse_type()?;
+        let value = if self.check(&TokenKind::Equal) {
+            self.advance();
+            Some(self.parse_expression()?)
+        } else {
+            None
+        };
 
-        self.expect(&TokenKind::Equal, "expected '=' in variable declaration")?;
-
-        let value = self.parse_expression()?;
+        if ty.is_none() && value.is_none() {
+            return Err(self.error_at(
+                "variable declaration requires a type or initializer",
+                self.previous_span(),
+            ));
+        }
 
         self.expect(
             &TokenKind::Semicolon,

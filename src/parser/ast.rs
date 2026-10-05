@@ -189,6 +189,7 @@ pub enum BinaryOp {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypeName {
     Int,
+    Float,
     String,
     Bool,
     Void,

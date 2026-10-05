@@ -53,7 +53,7 @@ pub struct BasicBlock {
     pub terminator: Terminator,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum IrInstruction {
     /// Initial SSA definition for a function parameter.
     Parameter {
@@ -64,6 +64,11 @@ pub enum IrInstruction {
     ConstInt {
         destination: ValueId,
         value: i64,
+    },
+
+    ConstFloat {
+        destination: ValueId,
+        value: f64,
     },
 
     ConstString {
@@ -178,6 +183,7 @@ pub enum IrType {
     #[default]
     None,
     Int,
+    Float,
     String,
     Bool,
     Void,
@@ -192,6 +198,7 @@ impl From<&Type> for IrType {
             Type::Bool => Self::Bool,
             Type::Void => Self::Void,
             Type::Struct(id) => Self::Struct(*id),
+            Type::Float => Self::Float,
         }
     }
 }

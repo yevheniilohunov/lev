@@ -107,7 +107,10 @@ fn collect_escaping_expr(expr: &HirExpr, escaping: &mut Vec<LocalId>) {
             }
         }
 
-        HirExprKind::Integer(_) | HirExprKind::String(_) | HirExprKind::Bool(_) => {}
+        HirExprKind::Integer(_)
+        | HirExprKind::Float(_)
+        | HirExprKind::String(_)
+        | HirExprKind::Bool(_) => {}
     }
 }
 
@@ -180,7 +183,10 @@ fn collect_value_locals(expr: &HirExpr, escaping: &mut Vec<LocalId>) {
             }
         }
 
-        HirExprKind::Integer(_) | HirExprKind::String(_) | HirExprKind::Bool(_) => {}
+        HirExprKind::Integer(_)
+        | HirExprKind::Float(_)
+        | HirExprKind::String(_)
+        | HirExprKind::Bool(_) => {}
     }
 }
 
@@ -295,7 +301,10 @@ fn mark_value(expr: &mut HirExpr, context: AllocationContext, escaping_locals: &
             let _ = escaping_locals.contains(local);
         }
 
-        HirExprKind::Integer(_) | HirExprKind::String(_) | HirExprKind::Bool(_) => {}
+        HirExprKind::Integer(_)
+        | HirExprKind::Float(_)
+        | HirExprKind::String(_)
+        | HirExprKind::Bool(_) => {}
     }
 }
 

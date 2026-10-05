@@ -176,6 +176,8 @@ impl<'a> Validator<'a> {
             }
 
             IrInstruction::ConstInt { .. } => Some(IrType::Int),
+            IrInstruction::ConstFloat { .. } => Some(IrType::Float),
+
             IrInstruction::ConstString { .. } => Some(IrType::String),
             IrInstruction::ConstBool { .. } => Some(IrType::Bool),
 
@@ -298,6 +300,7 @@ impl<'a> Validator<'a> {
     ) {
         match instruction {
             IrInstruction::ConstInt { .. }
+            | IrInstruction::ConstFloat { .. }
             | IrInstruction::ConstString { .. }
             | IrInstruction::ConstBool { .. }
             | IrInstruction::LoadLocal { .. }
@@ -1156,6 +1159,7 @@ impl<'a> Validator<'a> {
 fn instruction_destination(instruction: &IrInstruction) -> Option<ValueId> {
     match instruction {
         IrInstruction::ConstInt { destination, .. }
+        | IrInstruction::ConstFloat { destination, .. }
         | IrInstruction::ConstString { destination, .. }
         | IrInstruction::ConstBool { destination, .. }
         | IrInstruction::LoadLocal { destination, .. }

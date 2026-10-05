@@ -557,6 +557,17 @@ impl<'a> FunctionBuilder<'a> {
                 Some(destination)
             }
 
+            HirExprKind::Float(value) => {
+                let destination = self.new_value();
+
+                self.emit(IrInstruction::ConstFloat {
+                    destination,
+                    value: *value,
+                });
+
+                Some(destination)
+            }
+
             HirExprKind::String(value) => {
                 let destination = self.new_value();
 

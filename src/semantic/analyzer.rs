@@ -885,11 +885,6 @@ impl<'a> Analyzer<'a> {
                 value,
                 span,
             } => {
-                let value = match value {
-                    Some(value) => Some(self.analyze_expr(value, scope)),
-                    None => None,
-                };
-
                 let declared_type = match ty {
                     Some(ty) => match self.resolve_type(ty, *span) {
                         Some(ty) => Some(ty),
@@ -900,39 +895,103 @@ impl<'a> Analyzer<'a> {
                             )]);
                         }
                     },
-
                     None => None,
                 };
 
-                let local_type = match (declared_type, &value) {
-                    // let p: Point = expr;
-                    (Some(declared_type), Some(value)) => {
-                        if value.ty != declared_type {
-                            return Err(vec![self.error_at(
-                                format!(
-                        "cannot initialize variable '{}' of type {:?} with value of type {:?}",
-                        name, declared_type, value.ty
-                    ),
-                                *span,
-                            )]);
-                        }
-
-                        declared_type
-                    }
-
-                    // let p: Point;
-                    (Some(declared_type), None) => declared_type,
-
+                let value = match value {
                     // let p = expr;
-                    (None, Some(value)) => value.ty.clone(),
-
-                    // let p;
-                    (None, None) => {
+                    None if declared_type.is_none() => {
                         return Err(vec![self.error_at(
                             "variable declaration requires a type or initializer",
                             *span,
                         )]);
                     }
+
+                    // let p: Point;
+                    //
+                    // Primitive types get their default value.
+                    // Structs must be explicitly initialized.
+                    None => {
+                        let declared_type =
+                            declared_type.as_ref().expect("declared type checked above");
+
+                        let value = match declared_type {
+                            Type::Int => HirExpr {
+                                kind: HirExprKind::Integer(0),
+                                ty: Type::Int,
+                                span: *span,
+                            },
+
+                            Type::String => HirExpr {
+                                kind: HirExprKind::String(String::new()),
+                                ty: Type::String,
+                                span: *span,
+                            },
+
+                            Type::Bool => HirExpr {
+                                kind: HirExprKind::Bool(false),
+                                ty: Type::Bool,
+                                span: *span,
+                            },
+
+                            Type::Float => HirExpr {
+                                kind: HirExprKind::Float(0.0),
+                                ty: Type::Float,
+                                span: *span,
+                            },
+
+                            Type::Struct(_) => {
+                                return Err(vec![self.error_at(
+                                    format!(
+                                        "variable '{}' of type {:?} must be initialized",
+                                        name, declared_type
+                                    ),
+                                    *span,
+                                )]);
+                            }
+
+                            _ => {
+                                return Err(vec![self.error_at(
+                                    format!(
+                                        "variable '{}' of type {:?} must be initialized",
+                                        name, declared_type
+                                    ),
+                                    *span,
+                                )]);
+                            }
+                        };
+
+                        Some(value)
+                    }
+
+                    // There is an initializer.
+                    Some(value) => {
+                        let value = self.analyze_expr(value, scope);
+
+                        // let p: Point = expr;
+                        if let Some(declared_type) = &declared_type {
+                            if value.ty != *declared_type {
+                                return Err(vec![self.error_at(
+                                    format!(
+                            "cannot initialize variable '{}' of type {:?} with value of type {:?}",
+                            name, declared_type, value.ty
+                        ),
+                                    *span,
+                                )]);
+                            }
+                        }
+
+                        Some(value)
+                    }
+                };
+
+                let local_type = match &declared_type {
+                    Some(declared_type) => declared_type.clone(),
+                    None => value
+                        .as_ref()
+                        .expect("initializer must exist when type is inferred")
+                        .ty
+                        .clone(),
                 };
 
                 let local = match scope.declare(name.clone(), local_type, true) {

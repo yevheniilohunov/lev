@@ -390,6 +390,7 @@ fn eliminate_dead_code_from_function(function: &mut IrFunction) -> Result<(), Ve
 
                     IrInstruction::Parameter { .. }
                     | IrInstruction::ConstInt { .. }
+                    | IrInstruction::ConstFloat { .. }
                     | IrInstruction::ConstString { .. }
                     | IrInstruction::ConstBool { .. }
                     | IrInstruction::LoadLocal { .. }
@@ -446,6 +447,7 @@ fn instruction_destination(instruction: &IrInstruction) -> Option<ValueId> {
     match instruction {
         IrInstruction::Parameter { destination, .. }
         | IrInstruction::ConstInt { destination, .. }
+        | IrInstruction::ConstFloat { destination, .. }
         | IrInstruction::ConstString { destination, .. }
         | IrInstruction::ConstBool { destination, .. }
         | IrInstruction::LoadLocal { destination, .. }
@@ -997,6 +999,7 @@ fn copy_propagate_function(function: &mut IrFunction) -> Result<(), Vec<Compiler
 
                 IrInstruction::Parameter { .. }
                 | IrInstruction::ConstInt { .. }
+                | IrInstruction::ConstFloat { .. }
                 | IrInstruction::ConstString { .. }
                 | IrInstruction::ConstBool { .. }
                 | IrInstruction::LoadLocal { .. }
@@ -1294,6 +1297,7 @@ fn rewrite_instruction_values(instruction: &mut IrInstruction, copies: &HashMap<
 
         IrInstruction::Parameter { .. }
         | IrInstruction::ConstInt { .. }
+        | IrInstruction::ConstFloat { .. }
         | IrInstruction::ConstString { .. }
         | IrInstruction::ConstBool { .. }
         | IrInstruction::LoadLocal { .. }
@@ -2838,6 +2842,7 @@ pub fn eliminate_dead_stack_allocs(program: &mut IrProgram) -> Result<(), Vec<Co
 
                     IrInstruction::Parameter { .. }
                     | IrInstruction::ConstInt { .. }
+                    | IrInstruction::ConstFloat { .. }
                     | IrInstruction::ConstString { .. }
                     | IrInstruction::ConstBool { .. }
                     | IrInstruction::LoadLocal { .. }

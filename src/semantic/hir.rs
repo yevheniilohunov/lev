@@ -127,6 +127,8 @@ impl fmt::Display for HirExpr {
 pub enum HirExprKind {
     Integer(i64),
 
+    Float(f64),
+
     String(String),
 
     Bool(bool),

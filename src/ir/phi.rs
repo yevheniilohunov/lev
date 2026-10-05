@@ -44,6 +44,7 @@ fn instruction_destination(instruction: &IrInstruction) -> Option<ValueId> {
     match instruction {
         IrInstruction::Parameter { destination, .. }
         | IrInstruction::ConstInt { destination, .. }
+        | IrInstruction::ConstFloat { destination, .. }
         | IrInstruction::ConstString { destination, .. }
         | IrInstruction::ConstBool { destination, .. }
         | IrInstruction::LoadLocal { destination, .. }

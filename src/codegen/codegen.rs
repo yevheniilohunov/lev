@@ -1094,6 +1094,7 @@ impl<'a> FunctionCodegen<'a> {
                 arguments,
                 struct_id,
             } => todo!(),
+            IrInstruction::ConstFloat { destination, value } => todo!(),
         }
 
         Ok(())
@@ -1363,6 +1364,8 @@ fn instruction_destination(instruction: &IrInstruction) -> Option<ValueId> {
         IrInstruction::Parameter { destination, .. } => Some(*destination),
 
         IrInstruction::ConstInt { destination, .. } => Some(*destination),
+
+        IrInstruction::ConstFloat { destination, .. } => Some(*destination),
 
         IrInstruction::ConstString { destination, .. } => Some(*destination),
 

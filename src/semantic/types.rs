@@ -5,6 +5,7 @@ use super::symbols::StructId;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
     Int,
+    Float,
     String,
     Bool,
     Void,
@@ -24,6 +25,7 @@ impl Type {
             TypeName::Void => Some(Self::Void),
 
             TypeName::Named(_) => None,
+            TypeName::Float => Some(Self::Float),
         }
     }
 }
